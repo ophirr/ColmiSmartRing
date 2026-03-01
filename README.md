@@ -1,7 +1,15 @@
 # Colmi Smart Ring
 
+> **Fork:** [ophirronen/ColmiSmartRing](https://github.com/ophirronen/ColmiSmartRing)
+ 
+> **iOS app:** [YannisDC/ColmiSmartRing](https://github.com/YannisDC/ColmiSmartRing) by [Yannis De Cleene](https://github.com/YannisDC)
+
+> **Original Halo project:** [cyrilzakka/halo](https://huggingface.co/blog/cyrilzakka/halo-introduction) by [Cyril Zakka](https://github.com/cyrilzakka)
+
 Open-source tools and app work for Colmi smart ring data, built around one simple idea:
 **health should be accessible, transparent, and free.**
+
+This fork adds a **Gym Mode** with real-time heart rate zone tracking (OTF-style 5-zone visualization), haptic feedback on zone transitions, Apple Health sync, and adaptive light/dark mode support.
 
 If this project is useful to you, please consider giving it a star. It helps more people discover it.
 
@@ -50,6 +58,8 @@ Every contribution goes back into keeping this project free and improving benchm
 
 ## References
 
+- Original Halo project: [cyrilzakka/halo](https://huggingface.co/blog/cyrilzakka/halo-introduction) by Cyril Zakka — the project that started it all
+- iOS app: [YannisDC/ColmiSmartRing](https://github.com/YannisDC/ColmiSmartRing) by Yannis De Cleene — built the Swift iOS app this fork extends
 - Original reverse-engineering/client work: https://github.com/tahnok/colmi_r02_client/tree/9e08383f6315e3211395edc64e5097333f1a42a5
 - Project background: https://huggingface.co/blog/cyrilzakka/halo-introduction
 - API: https://colmi.puxtril.com
