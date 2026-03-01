@@ -35,15 +35,17 @@ struct HomeSummaryCardsView: View {
             Label(L10n.HomeSummary.activity, systemImage: "figure.walk")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
-            HStack(spacing: 16) {
+            HStack(spacing: 24) {
                 metricCell(value: "\(steps)", unit: L10n.HomeSummary.steps, color: .cyan)
                 metricCell(value: String(format: "%.2f", distanceKm), unit: "km", color: .green)
                 metricCell(value: "\(calories)", unit: L10n.HomeSummary.calories, color: .red)
             }
+            .frame(maxWidth: .infinity)
             if !activityLabel.isEmpty {
                 Text(activityLabel)
                     .font(.caption)
                     .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -98,12 +100,12 @@ struct HomeSummaryCardsView: View {
     }
 
     private func metricCell(value: String, unit: String, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(spacing: 4) {
             Text(value)
-                .font(.headline)
+                .font(.system(size: 40, weight: .bold, design: .rounded))
                 .foregroundStyle(color)
             Text(unit)
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }

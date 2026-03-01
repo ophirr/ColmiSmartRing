@@ -149,6 +149,7 @@ struct ActivityStepsCumulativeChartView: View {
             }
             .chartYAxis { AxisMarks(position: .leading) }
             .frame(height: 180)
+            .allowsHitTesting(false)
         }
         .padding(.vertical, 4)
     }
@@ -187,6 +188,7 @@ struct ActivityDistanceCumulativeChartView: View {
             }
             .chartYAxis { AxisMarks(position: .leading) }
             .frame(height: 180)
+            .allowsHitTesting(false)
         }
         .padding(.vertical, 4)
     }
@@ -225,6 +227,7 @@ struct ActivityCaloriesCumulativeChartView: View {
             }
             .chartYAxis { AxisMarks(position: .leading) }
             .frame(height: 180)
+            .allowsHitTesting(false)
         }
         .padding(.vertical, 4)
     }

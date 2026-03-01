@@ -38,25 +38,41 @@ struct ActivityScreenView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    ActivityStepsCumulativeChartView(
-                        data: chartStepsData,
-                        title: L10n.Activity.stepsTitle
-                    )
-                    ActivityDistanceCumulativeChartView(
-                        data: chartDistanceData,
-                        title: L10n.Activity.distanceTitle
-                    )
-                    ActivityCaloriesCumulativeChartView(
-                        data: chartCaloriesData,
-                        title: L10n.Activity.caloriesTitle
-                    )
-                } header: {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
                     Label(L10n.Tab.activity, systemImage: "figure.walk")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+                        .padding(.horizontal)
+
+                    VStack(spacing: 20) {
+                        ActivityStepsCumulativeChartView(
+                            data: chartStepsData,
+                            title: L10n.Activity.stepsTitle
+                        )
+                        .allowsHitTesting(false)
+                        .contentShape(Rectangle())
+
+                        ActivityDistanceCumulativeChartView(
+                            data: chartDistanceData,
+                            title: L10n.Activity.distanceTitle
+                        )
+                        .allowsHitTesting(false)
+                        .contentShape(Rectangle())
+
+                        ActivityCaloriesCumulativeChartView(
+                            data: chartCaloriesData,
+                            title: L10n.Activity.caloriesTitle
+                        )
+                        .allowsHitTesting(false)
+                        .contentShape(Rectangle())
+                    }
+                    .padding(.horizontal)
                 }
+                .padding(.top)
+                .padding(.bottom, 40)
             }
-            .listStyle(.insetGrouped)
             .navigationTitle(L10n.Tab.activity)
             .navigationBarTitleDisplayMode(.large)
         }
