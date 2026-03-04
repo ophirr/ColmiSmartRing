@@ -10,12 +10,16 @@ final class RingDataPersistenceCoordinator {
     private var stressSeriesAccumulator = SplitSeriesPacketParser.SeriesAccumulator()
     private let healthSleepWriter = AppleHealthSleepWriter()
     private let healthActivityWriter = AppleHealthActivityWriter()
+    private let influx = InfluxDBWriter.shared
 
     private static let logDateFormatter = ISO8601DateFormatter()
 
     init(modelContext: ModelContext, ringSessionManager: RingSessionManager) {
         self.modelContext = modelContext
         self.ringSessionManager = ringSessionManager
+        if UserDefaults.standard.object(forKey: "cloudSyncEnabled") == nil || UserDefaults.standard.bool(forKey: "cloudSyncEnabled") {
+            influx.start()
+        }
     }
 
     func start() {
@@ -95,6 +99,18 @@ final class RingDataPersistenceCoordinator {
             Task { @MainActor in
                 await healthSleepWriter.writeSleepDays(bigData.days, todayStart: today)
             }
+            // Stream sleep stages to InfluxDB
+            for day in bigData.days {
+                let daysAgo = Int(day.daysAgo)
+                let nightDate = calendar.date(byAdding: .day, value: -daysAgo, to: today) ?? today
+                let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(Int(day.sleepStart) * 60))
+                var elapsed = 0
+                for period in day.periods {
+                    let periodStart = sleepStartDate.addingTimeInterval(TimeInterval(elapsed * 60))
+                    elapsed += Int(period.minutes)
+                    influx.writeSleep(stage: sleepTypeName(period.type), durationMinutes: Int(period.minutes), time: periodStart)
+                }
+            }
         }
     }
 
@@ -130,6 +146,11 @@ final class RingDataPersistenceCoordinator {
 
         debugPrint("[AutoPersist] Heart rate log save requested. action=\(action) dayStart=\(formatDate(dayStart))")
         _ = saveContext(tag: "HeartRate")
+
+        // Stream to InfluxDB
+        if let readings = try? log.heartRatesWithTimes() {
+            influx.writeHeartRates(readings.map { (bpm: $0.0, time: $0.1) })
+        }
     }
 
     // MARK: - Activity
@@ -187,6 +208,7 @@ final class RingDataPersistenceCoordinator {
             Task { @MainActor in
                 await healthActivityWriter.writeActivitySample(timestamp: timestamp, steps: steps, calories: calories)
             }
+            influx.writeActivity(steps: steps, calories: calories, distanceKm: distanceKm, time: timestamp)
         }
     }
 
@@ -228,6 +250,10 @@ final class RingDataPersistenceCoordinator {
         }
         debugPrint("[AutoPersist] HRV save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "HRV")
+
+        for point in series {
+            influx.writeHRV(value: point.value, time: point.time)
+        }
     }
 
     private func persistStressSeries(_ series: [TimeSeriesPoint]) {
@@ -245,6 +271,10 @@ final class RingDataPersistenceCoordinator {
         }
         debugPrint("[AutoPersist] Stress save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "Stress")
+
+        for point in series {
+            influx.writeStress(value: point.value, time: point.time)
+        }
     }
 
     // MARK: - Blood oxygen
@@ -292,6 +322,10 @@ final class RingDataPersistenceCoordinator {
         }
         debugPrint("[AutoPersist] Blood oxygen save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "BloodOxygen")
+
+        for point in series {
+            influx.writeSpO2(value: point.value, time: point.time)
+        }
     }
 
     private func dayAtHour(daysAgo: Int, hour: Int) -> Date {
@@ -317,5 +351,16 @@ final class RingDataPersistenceCoordinator {
 
     private func formatDate(_ date: Date) -> String {
         Self.logDateFormatter.string(from: date)
+    }
+
+    private func sleepTypeName(_ type: SleepType) -> String {
+        switch type {
+        case .noData: return "no_data"
+        case .error: return "error"
+        case .light: return "light"
+        case .deep: return "deep"
+        case .core: return "core"
+        case .awake: return "awake"
+        }
     }
 }
