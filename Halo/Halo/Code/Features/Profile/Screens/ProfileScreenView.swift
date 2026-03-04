@@ -40,6 +40,7 @@ struct ProfileScreenView: View {
                 DeviceSectionView(ringSessionManager: ringSessionManager, showAddRingSheet: $showAddRingSheet)
                 BatterySectionView(ringSessionManager: ringSessionManager)
                 TrackingSettingsSectionView(ringSessionManager: ringSessionManager)
+                HRLogIntervalSectionView(ringSessionManager: ringSessionManager)
                 Section("Data Timezone") {
                     Picker("Timezone", selection: $ringSessionManager.preferredDataTimeZoneIdentifier) {
                         ForEach(dataTimeZoneOptions, id: \.self) { id in

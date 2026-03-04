@@ -128,6 +128,8 @@ class RingSessionManager: NSObject {
     private static let CMD_BLINK_TWICE: UInt8 = 16 // 0x10
     private static let CMD_BATTERY: UInt8 = 3
     private static let CMD_READ_HEART_RATE: UInt8 = 21  // 0x15
+    /// HR timing monitor switch: READ/WRITE enabled + interval in minutes. ID: 0x16.
+    private static let CMD_HR_TIMING_MONITOR: UInt8 = 0x16
     /// Heart Rate setting (Settings protocol): READ/WRITE isEnabled. ID: 22.
     private static let CMD_HEART_RATE_SETTING: UInt8 = 22
     /// Pressure/Stress setting (Settings protocol): READ/WRITE isEnabled. ID: 54.
@@ -186,6 +188,12 @@ class RingSessionManager: NSObject {
     var heartRateLogPersistenceCallback: ((HeartRateLog) -> Void)?
     /// Called when the ring is connected and UART characteristics are ready; use this to trigger tracking-settings reads.
     var onReadyForSettingsQuery: (() -> Void)?
+    /// HR log interval reported by the ring (minutes). nil = not yet queried.
+    var hrLogIntervalMinutes: Int?
+    /// HR log enabled state reported by the ring. nil = not yet queried.
+    var hrLogEnabled: Bool?
+    /// Pending continuation for HR log settings read.
+    private var pendingHRLogSettingsContinuation: CheckedContinuation<(enabled: Bool, intervalMinutes: Int), Error>?
     /// Single callback or continuation for any in-flight tracking setting READ; cleared after use.
     private var pendingTrackingSetting: RingTrackingSetting?
     private var pendingTrackingSettingCallback: ((Bool) -> Void)?
@@ -558,6 +566,8 @@ extension RingSessionManager: CBPeripheralDelegate {
             handleBatteryResponse(packet: packet)
         case RingSessionManager.CMD_READ_HEART_RATE:
             handleHeartRateLogResponse(packet: packet)
+        case RingSessionManager.CMD_HR_TIMING_MONITOR:
+            handleHRTimingMonitorResponse(packet: packet)
         case Counter.shared.CMD_X:
             debugPrint("🔥")
         case RingSessionManager.CMD_START_REAL_TIME:
@@ -772,6 +782,14 @@ extension RingSessionManager {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) { [weak self] in
             self?.syncActivityData(dayOffset: 0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                if let settings = try? await self.readHRLogSettings() {
+                    debugPrint("[SyncOnConnect] HR log settings: enabled=\(settings.enabled), interval=\(settings.intervalMinutes)min")
+                }
+            }
         }
     }
 }
@@ -1087,6 +1105,74 @@ extension RingSessionManager {
             peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
         } catch {
             debugPrint("Failed to create settings write packet: \(error)")
+        }
+    }
+}
+
+// MARK: - HR Log Settings (Timing Monitor: interval + enabled)
+
+extension RingSessionManager {
+    /// Read the current HR log settings (enabled + interval) from the ring.
+    func readHRLogSettings() async throws -> (enabled: Bool, intervalMinutes: Int) {
+        try await withCheckedThrowingContinuation { continuation in
+            guard uartRxCharacteristic != nil, peripheral != nil else {
+                continuation.resume(throwing: RingSessionTrackingError.notConnected)
+                return
+            }
+            pendingHRLogSettingsContinuation = continuation
+            do {
+                // Read: send command 0x16 with all-zero subdata
+                let packet = try makePacket(command: Self.CMD_HR_TIMING_MONITOR)
+                appendToDebugLog(direction: .sent, bytes: packet)
+                sendPacket(packet: packet)
+            } catch {
+                pendingHRLogSettingsContinuation = nil
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    /// Write HR log settings to the ring: enabled state + interval in minutes (1–10).
+    func writeHRLogSettings(enabled: Bool, intervalMinutes: Int) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            guard uartRxCharacteristic != nil, peripheral != nil else {
+                continuation.resume(throwing: RingSessionTrackingError.notConnected)
+                return
+            }
+            do {
+                var subData: [UInt8] = [
+                    enabled ? 1 : 0,
+                    UInt8(clamping: intervalMinutes)
+                ]
+                // Pad to fit standard packet (14 bytes subdata max, we only need 2)
+                let packet = try makePacket(command: Self.CMD_HR_TIMING_MONITOR, subData: subData)
+                appendToDebugLog(direction: .sent, bytes: packet)
+                sendPacket(packet: packet)
+                // Update local state immediately (ring doesn't always echo back on write)
+                hrLogEnabled = enabled
+                hrLogIntervalMinutes = intervalMinutes
+                debugPrint("[HRLogSettings] Wrote enabled=\(enabled), interval=\(intervalMinutes)min")
+                continuation.resume()
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    private func handleHRTimingMonitorResponse(packet: [UInt8]) {
+        guard packet.count >= 3, packet[0] == Self.CMD_HR_TIMING_MONITOR else {
+            debugPrint("[HRLogSettings] Invalid HR timing monitor packet: \(packet)")
+            return
+        }
+        let enabled = packet[1] != 0
+        let interval = Int(packet[2])
+        hrLogEnabled = enabled
+        hrLogIntervalMinutes = interval
+        debugPrint("[HRLogSettings] Response: enabled=\(enabled), interval=\(interval)min")
+
+        if let continuation = pendingHRLogSettingsContinuation {
+            pendingHRLogSettingsContinuation = nil
+            continuation.resume(returning: (enabled: enabled, intervalMinutes: interval))
         }
     }
 }
