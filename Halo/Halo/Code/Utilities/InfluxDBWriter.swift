@@ -16,16 +16,15 @@ struct InfluxDBConfig {
     let bucket: String
     let token: String
 
-    /// Default config — reads from UserDefaults, falling back to hardcoded defaults.
+    /// Default config — reads from UserDefaults, falling back to Secrets.swift defaults.
     static var saved: InfluxDBConfig? {
         let defaults = UserDefaults.standard
-        let token = defaults.string(forKey: "influxdb.token")
-            ?? "R3ZPeIh_tBEUG2i_OKDW_4-ye5IjUhUuNdMGGi7439oU4pqmX1Kk9XBsKwrkMwjx3g9eDg4Y5sQef-A6Y3QSdQ=="
+        let token = defaults.string(forKey: "influxdb.token") ?? Secrets.influxDBToken
         guard !token.isEmpty else { return nil }
         return InfluxDBConfig(
-            url: defaults.string(forKey: "influxdb.url") ?? "https://us-east-1-1.aws.cloud2.influxdata.com",
-            org: defaults.string(forKey: "influxdb.org") ?? "FunCo",
-            bucket: defaults.string(forKey: "influxdb.bucket") ?? "ringie",
+            url: defaults.string(forKey: "influxdb.url") ?? Secrets.influxDBURL,
+            org: defaults.string(forKey: "influxdb.org") ?? Secrets.influxDBOrg,
+            bucket: defaults.string(forKey: "influxdb.bucket") ?? Secrets.influxDBBucket,
             token: token
         )
     }
@@ -44,6 +43,55 @@ struct InfluxDBConfig {
     }
 }
 
+// MARK: - Activity Tags
+
+enum ActivityTag: String, CaseIterable, Identifiable {
+    case none       = "none"
+    case resting    = "resting"
+    case sleeping   = "sleeping"
+    case meditating = "meditating"
+    case exercising = "exercising"
+    case running    = "running"
+    case fun1       = "fun_1"
+    case fun2       = "fun_2"
+    case fun3       = "fun_3"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .none:       return "None"
+        case .resting:    return "Resting"
+        case .sleeping:   return "Sleeping"
+        case .meditating: return "Meditating"
+        case .exercising: return "Exercising"
+        case .running:    return "Running"
+        case .fun1:       return "Fun (1)"
+        case .fun2:       return "Fun (2)"
+        case .fun3:       return "Fun (3)"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .none:       return "tag.slash"
+        case .resting:    return "figure.seated.seatbelt"
+        case .sleeping:   return "moon.zzz"
+        case .meditating: return "figure.mind.and.body"
+        case .exercising: return "figure.strengthtraining.traditional"
+        case .running:    return "figure.run"
+        case .fun1:       return "sparkles"
+        case .fun2:       return "star"
+        case .fun3:       return "flame"
+        }
+    }
+
+    /// Line protocol tag fragment — empty string when no tag is active.
+    var lineProtocolSuffix: String {
+        self == .none ? "" : ",activity=\(rawValue)"
+    }
+}
+
 // MARK: - Writer
 
 @MainActor
@@ -58,6 +106,14 @@ final class InfluxDBWriter {
     private var totalWritten: Int = 0
     private var totalErrors: Int = 0
 
+    /// Current activity tag applied to all writes.
+    var activeTag: ActivityTag = .none {
+        didSet {
+            UserDefaults.standard.set(activeTag.rawValue, forKey: "influxdb.activeTag")
+            debugPrint("[InfluxDB] Tag changed → \(activeTag.displayName)")
+        }
+    }
+
     /// Whether the writer is configured and active.
     var isEnabled: Bool { config != nil }
     var stats: String { "Written: \(totalWritten) | Errors: \(totalErrors) | Buffered: \(buffer.count)" }
@@ -66,6 +122,11 @@ final class InfluxDBWriter {
 
     /// Load config from UserDefaults and start the flush timer.
     func start() {
+        // Restore saved tag
+        if let savedTag = UserDefaults.standard.string(forKey: "influxdb.activeTag"),
+           let tag = ActivityTag(rawValue: savedTag) {
+            activeTag = tag
+        }
         config = InfluxDBConfig.saved
         guard config != nil else {
             debugPrint("[InfluxDB] No config found — cloud sync disabled. Set influxdb.token in UserDefaults.")
@@ -114,39 +175,42 @@ final class InfluxDBWriter {
 
     // MARK: - Convenience writers for ring data types
 
+    /// Tag fragment for line protocol, e.g. ",activity=meditating"
+    private var tag: String { activeTag.lineProtocolSuffix }
+
     func writeHeartRates(_ readings: [(bpm: Int, time: Date)]) {
         let lines = readings.map { reading in
-            "heart_rate,source=colmi_r02 bpm=\(reading.bpm)i \(epochSeconds(reading.time))"
+            "heart_rate,source=colmi_r02\(tag) bpm=\(reading.bpm)i \(epochSeconds(reading.time))"
         }
         write(lines)
     }
 
     func writeHRV(value: Double, time: Date) {
-        write("hrv,source=colmi_r02 ms=\(value) \(epochSeconds(time))")
+        write("hrv,source=colmi_r02\(tag) ms=\(value) \(epochSeconds(time))")
     }
 
     func writeStress(value: Double, time: Date) {
-        write("stress,source=colmi_r02 level=\(value) \(epochSeconds(time))")
+        write("stress,source=colmi_r02\(tag) level=\(value) \(epochSeconds(time))")
     }
 
     func writeSpO2(value: Double, time: Date) {
-        write("spo2,source=colmi_r02 percent=\(value) \(epochSeconds(time))")
+        write("spo2,source=colmi_r02\(tag) percent=\(value) \(epochSeconds(time))")
     }
 
     func writeActivity(steps: Int, calories: Int, distanceKm: Double, time: Date) {
-        write("activity,source=colmi_r02 steps=\(steps)i,calories=\(calories)i,distance_km=\(distanceKm) \(epochSeconds(time))")
+        write("activity,source=colmi_r02\(tag) steps=\(steps)i,calories=\(calories)i,distance_km=\(distanceKm) \(epochSeconds(time))")
     }
 
     func writeSleep(stage: String, durationMinutes: Int, time: Date) {
-        write("sleep,source=colmi_r02,stage=\(stage) duration_min=\(durationMinutes)i \(epochSeconds(time))")
+        write("sleep,source=colmi_r02\(tag),stage=\(stage) duration_min=\(durationMinutes)i \(epochSeconds(time))")
     }
 
     func writeGymHR(bpm: Int, sessionID: String, time: Date) {
-        write("gym_hr,source=colmi_r02,session_id=\(sessionID) bpm=\(bpm)i \(epochSeconds(time))")
+        write("gym_hr,source=colmi_r02\(tag),session_id=\(sessionID) bpm=\(bpm)i \(epochSeconds(time))")
     }
 
     func writeBattery(level: Int, charging: Bool, time: Date) {
-        write("battery,source=colmi_r02 level=\(level)i,charging=\(charging ? "true" : "false") \(epochSeconds(time))")
+        write("battery,source=colmi_r02\(tag) level=\(level)i,charging=\(charging ? "true" : "false") \(epochSeconds(time))")
     }
 
     // MARK: - Flush

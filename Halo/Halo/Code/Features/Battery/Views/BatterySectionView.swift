@@ -2,7 +2,7 @@
 //  BatterySectionView.swift
 //  Halo
 //
-//  Battery feature: visual gauge with color-coded level and charging indicator.
+//  Battery feature: compact row with icon, level bar, and estimate.
 //
 
 import SwiftUI
@@ -13,71 +13,60 @@ struct BatterySectionView: View {
     var body: some View {
         Section(L10n.Battery.sectionTitle) {
             if let info = ringSessionManager.currentBatteryInfo {
-                HStack(spacing: 14) {
-                    // Battery icon
+                HStack(spacing: 10) {
                     batteryIcon(level: info.batteryLevel, charging: info.charging)
-                        .font(.system(size: 36))
+                        .font(.system(size: 20))
                         .foregroundStyle(batteryColor(info.batteryLevel))
                         .symbolEffect(.pulse, options: .repeating, isActive: info.charging)
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        // Percentage
-                        HStack(alignment: .firstTextBaseline, spacing: 2) {
-                            Text("\(info.batteryLevel)")
-                                .font(.system(size: 32, weight: .bold, design: .rounded))
-                                .monospacedDigit()
-                            Text("%")
-                                .font(.system(size: 18, weight: .medium, design: .rounded))
+                    Text("\(info.batteryLevel)%")
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .frame(width: 42, alignment: .trailing)
+
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Color(.systemGray5))
+                                .frame(height: 6)
+
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(batteryColor(info.batteryLevel).gradient)
+                                .frame(width: geo.size.width * CGFloat(info.batteryLevel) / 100.0, height: 6)
+                        }
+                    }
+                    .frame(height: 6)
+
+                    if info.charging {
+                        HStack(spacing: 2) {
+                            Image(systemName: "bolt.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.yellow)
+                            Text("Charging")
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-
-                        // Progress bar
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(Color(.systemGray5))
-                                    .frame(height: 8)
-
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(batteryColor(info.batteryLevel).gradient)
-                                    .frame(width: geo.size.width * CGFloat(info.batteryLevel) / 100.0, height: 8)
-                            }
-                        }
-                        .frame(height: 8)
-
-                        // Status label
-                        HStack(spacing: 4) {
-                            if info.charging {
-                                Image(systemName: "bolt.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(.yellow)
-                                Text("Charging")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                Text(batteryEstimate(info.batteryLevel))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-                .padding(.vertical, 4)
-            } else {
-                HStack(spacing: 14) {
-                    Image(systemName: "battery.0percent")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("--%")
-                            .font(.system(size: 32, weight: .bold, design: .rounded))
-                            .foregroundStyle(.secondary)
-                        Text("Connect ring to check battery")
+                        .fixedSize()
+                    } else {
+                        Text(batteryEstimate(info.batteryLevel))
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .fixedSize()
                     }
                 }
-                .padding(.vertical, 4)
+            } else {
+                HStack(spacing: 10) {
+                    Image(systemName: "battery.0percent")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.secondary)
+                    Text("--%")
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Connect ring")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -106,14 +95,8 @@ struct BatterySectionView: View {
         }
     }
 
-    /// Rough battery life estimate scaled by HR log interval.
-    /// Baseline model: 17mAh battery, PPG sensor is the dominant drain.
-    /// At 5 min interval ≈ 5 days. Each PPG wake costs roughly the same energy,
-    /// so total life scales roughly linearly with interval.
     private func batteryEstimate(_ level: Int) -> String {
         let interval = ringSessionManager.hrLogIntervalMinutes ?? 5
-        // Baseline: 5 days at 5-min interval. Scale linearly.
-        // 1 min → 5x more wakes → ~1 day. 10 min → 0.5x wakes → ~7 days (capped by idle drain).
         let baseDays: Double = switch interval {
         case 1:  1.2
         case 2:  2.0
@@ -129,12 +112,12 @@ struct BatterySectionView: View {
         }
         let daysRemaining = Double(level) / 100.0 * baseDays
         if daysRemaining < 0.5 {
-            return "Low — charge soon"
+            return "Low"
         } else if daysRemaining < 1.0 {
-            return "~\(Int(daysRemaining * 24))h remaining @ \(interval)min interval"
+            return "~\(Int(daysRemaining * 24))h left"
         } else {
             let d = Int(daysRemaining)
-            return "~\(d) day\(d == 1 ? "" : "s") remaining @ \(interval)min interval"
+            return "~\(d)d left"
         }
     }
 }
