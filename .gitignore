@@ -63,3 +63,5 @@ fastlane/test_output
 
 .debug/
 .DS_Store
+# Local secrets
+Halo/Halo/Code/Utilities/Secrets.swift
