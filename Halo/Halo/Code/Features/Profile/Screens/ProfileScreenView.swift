@@ -39,6 +39,7 @@ struct ProfileScreenView: View {
             List {
                 DeviceSectionView(ringSessionManager: ringSessionManager, showAddRingSheet: $showAddRingSheet)
                 BatterySectionView(ringSessionManager: ringSessionManager)
+                ActivityTagPickerView()
                 TrackingSettingsSectionView(ringSessionManager: ringSessionManager)
                 HRLogIntervalSectionView(ringSessionManager: ringSessionManager)
                 CloudSyncSectionView()
