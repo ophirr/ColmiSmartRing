@@ -137,6 +137,17 @@ enum HRZone: Int, CaseIterable, Codable {
         }
     }
 
+    var colorLabel: String {
+        switch self {
+        case .rest:  return "Rest Zone"
+        case .zone1: return "Gray Zone"
+        case .zone2: return "Blue Zone"
+        case .zone3: return "Green Zone"
+        case .zone4: return "Orange Zone"
+        case .zone5: return "Red Zone"
+        }
+    }
+
     var color: Color {
         switch self {
         case .rest:  return .gray.opacity(0.5)

@@ -55,6 +55,11 @@ struct GymScreenView: View {
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                if gymManager.workoutState == .finished {
+                    gymManager.resetToIdle()
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { showingHistory = true } label: {
@@ -184,7 +189,7 @@ struct GymScreenView: View {
             }
 
             // Zone label
-            Text(gymManager.currentZone.label.uppercased())
+            Text(gymManager.currentZone.colorLabel.uppercased())
                 .font(.system(size: 24, weight: .heavy))
                 .foregroundStyle(gymManager.currentZone.color)
                 .padding(.top, 4)
@@ -266,16 +271,6 @@ struct GymScreenView: View {
                 .foregroundStyle(.primary)
 
             Spacer()
-        }
-        .task {
-            // Wait for save alert to dismiss, then auto-reset after 5 seconds
-            while showingSaveConfirm {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-            }
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-            if gymManager.workoutState == .finished {
-                gymManager.resetToIdle()
-            }
         }
     }
 
