@@ -29,16 +29,16 @@ struct GymScreenView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                // Adaptive background
-                Color(.systemBackground)
-                    .ignoresSafeArea()
-
-                // Zone color overlay — only during active workout
-                if gymManager.workoutState == .active || gymManager.workoutState == .paused {
-                    zoneBackground
-                        .ignoresSafeArea()
-                        .opacity(0.6)
-                }
+                // Full-screen zone gradient background
+                LinearGradient(
+                    colors: gymManager.workoutState == .active || gymManager.workoutState == .paused
+                        ? [zoneBackground, Color(red: 0.05, green: 0.05, blue: 0.08)]
+                        : [Color(red: 0.08, green: 0.08, blue: 0.12), Color(red: 0.05, green: 0.05, blue: 0.08)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+                .animation(.easeInOut(duration: 0.8), value: gymManager.currentZone)
 
                 VStack(spacing: 0) {
                     switch gymManager.workoutState {
@@ -84,11 +84,12 @@ struct GymScreenView: View {
 
             // Connection status
             VStack(spacing: 8) {
-                Image(systemName: ringSessionManager.peripheralConnected ? "checkmark.circle.fill" : "exclamationmark.circle")
+                Image(systemName: ringSessionManager.isEffectivelyConnected ? "checkmark.circle.fill" : "exclamationmark.circle")
                     .font(.system(size: 40))
-                    .foregroundStyle(ringSessionManager.peripheralConnected ? .green : .orange)
+                    .foregroundStyle(ringSessionManager.isEffectivelyConnected ? .green : .orange)
 
-                Text(ringSessionManager.peripheralConnected ? "Ring Connected" : "Ring Not Connected")
+                Text(ringSessionManager.demoModeActive ? "Demo Mode" :
+                     ringSessionManager.peripheralConnected ? "Ring Connected" : "Ring Not Connected")
                     .font(.headline)
                     .foregroundStyle(.primary.opacity(0.8))
             }
@@ -145,13 +146,12 @@ struct GymScreenView: View {
                     .padding(.vertical, 20)
                     .background(
                         RoundedRectangle(cornerRadius: 16)
-                            .fill(ringSessionManager.peripheralConnected ?
+                            .fill(ringSessionManager.isEffectivelyConnected ?
                                   Color(red: 1.0, green: 0.55, blue: 0.0) :
                                     Color.gray.opacity(0.5))
                     )
             }
-            // .disabled(!ringSessionManager.peripheralConnected)
-            .disabled(false) // TODO: flip back when ring arrives
+            .disabled(!ringSessionManager.isEffectivelyConnected)
             .padding(.horizontal, 32)
 
             Spacer()
@@ -240,7 +240,7 @@ struct GymScreenView: View {
         }
         .alert("Save Workout?", isPresented: $showingSaveConfirm) {
             Button("Save") { saveWorkout() }
-            Button("Discard", role: .destructive) { gymManager.resetToIdle() }
+            Button("Discard", role: .destructive) { completedWorkout = nil }
             Button("Cancel", role: .cancel) { }
         } message: {
             if let w = completedWorkout {
@@ -255,26 +255,26 @@ struct GymScreenView: View {
         VStack(spacing: 24) {
             Spacer()
 
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 60))
+                .foregroundStyle(.green)
+
             Text("Workout Complete")
                 .font(.title.bold())
                 .foregroundStyle(.primary)
 
-            Button {
-                gymManager.resetToIdle()
-            } label: {
-                Text("NEW WORKOUT")
-                    .font(.title3.bold())
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    .background(
-                        RoundedRectangle(cornerRadius: 16)
-                            .fill(Color(red: 1.0, green: 0.55, blue: 0.0))
-                    )
-            }
-            .padding(.horizontal, 32)
-
             Spacer()
+        }
+        .onChange(of: showingSaveConfirm) { _, showing in
+            // Start 5-second countdown after save/discard alert is dismissed
+            if !showing && gymManager.workoutState == .finished {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    if gymManager.workoutState == .finished {
+                        gymManager.resetToIdle()
+                    }
+                }
+            }
         }
     }
 
@@ -292,7 +292,7 @@ struct GymScreenView: View {
         }
 
         completedWorkout = nil
-        gymManager.resetToIdle()
+        // Stay in .finished state — auto-resets after 5 seconds
     }
 
     private func formatDuration(_ seconds: Double) -> String {

@@ -151,12 +151,12 @@ enum HRZone: Int, CaseIterable, Codable {
     /// Darker variant for background gradients (dark mode).
     var darkColor: Color {
         switch self {
-        case .rest:  return Color(red: 0.15, green: 0.15, blue: 0.15)
-        case .zone1: return Color(red: 0.25, green: 0.25, blue: 0.25)
-        case .zone2: return Color(red: 0.0, green: 0.2, blue: 0.4)
-        case .zone3: return Color(red: 0.05, green: 0.3, blue: 0.05)
-        case .zone4: return Color(red: 0.45, green: 0.2, blue: 0.0)
-        case .zone5: return Color(red: 0.4, green: 0.0, blue: 0.0)
+        case .rest:  return Color(red: 0.10, green: 0.10, blue: 0.12)
+        case .zone1: return Color(red: 0.22, green: 0.22, blue: 0.28)  // Cool gray
+        case .zone2: return Color(red: 0.0, green: 0.15, blue: 0.45)   // Deep blue
+        case .zone3: return Color(red: 0.0, green: 0.28, blue: 0.0)    // Deep green
+        case .zone4: return Color(red: 0.50, green: 0.22, blue: 0.0)   // Deep orange
+        case .zone5: return Color(red: 0.50, green: 0.0, blue: 0.0)    // Deep red
         }
     }
 
