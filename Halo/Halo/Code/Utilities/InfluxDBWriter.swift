@@ -14,6 +14,7 @@ struct InfluxDBConfig {
     let url: String
     let org: String
     let bucket: String
+    let demoBucket: String
     let token: String
 
     /// Default config — reads from UserDefaults, falling back to Secrets.swift defaults.
@@ -25,6 +26,7 @@ struct InfluxDBConfig {
             url: defaults.string(forKey: "influxdb.url") ?? Secrets.influxDBURL,
             org: defaults.string(forKey: "influxdb.org") ?? Secrets.influxDBOrg,
             bucket: defaults.string(forKey: "influxdb.bucket") ?? Secrets.influxDBBucket,
+            demoBucket: Secrets.influxDBDemoBucket,
             token: token
         )
     }
@@ -38,8 +40,9 @@ struct InfluxDBConfig {
         defaults.set(token, forKey: "influxdb.token")
     }
 
-    var writeURL: URL? {
-        URL(string: "\(url)/api/v2/write?org=\(org)&bucket=\(bucket)&precision=s")
+    func writeURL(demo: Bool) -> URL? {
+        let b = demo ? demoBucket : bucket
+        return URL(string: "\(url)/api/v2/write?org=\(org)&bucket=\(b)&precision=s")
     }
 }
 
@@ -116,7 +119,11 @@ final class InfluxDBWriter {
 
     /// Whether the writer is configured and active.
     var isEnabled: Bool { config != nil }
-    var stats: String { "Written: \(totalWritten) | Errors: \(totalErrors) | Buffered: \(buffer.count)" }
+    var demoMode = false
+    var stats: String {
+        let bucket = demoMode ? "demo" : "prod"
+        return "[\(bucket)] Written: \(totalWritten) | Errors: \(totalErrors) | Buffered: \(buffer.count)"
+    }
 
     private init() {}
 
@@ -138,7 +145,7 @@ final class InfluxDBWriter {
 
     /// Configure and start with explicit values. Saves to UserDefaults.
     func configure(url: String, org: String, bucket: String, token: String) {
-        let cfg = InfluxDBConfig(url: url, org: org, bucket: bucket, token: token)
+        let cfg = InfluxDBConfig(url: url, org: org, bucket: bucket, demoBucket: Secrets.influxDBDemoBucket, token: token)
         cfg.save()
         config = cfg
         debugPrint("[InfluxDB] Configured — writing to \(bucket)@\(url)")
@@ -217,7 +224,7 @@ final class InfluxDBWriter {
 
     func flush() {
         guard let config, !buffer.isEmpty else { return }
-        guard let url = config.writeURL else {
+        guard let url = config.writeURL(demo: demoMode) else {
             debugPrint("[InfluxDB] Invalid write URL")
             return
         }

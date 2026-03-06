@@ -51,6 +51,7 @@ final class DemoDataGenerator {
 
         // Activate demo ring state
         ringSessionManager.demoModeActive = true
+        influx.demoMode = true
         ringSessionManager.currentBatteryInfo = BatteryInfo(batteryLevel: demoBatteryLevel, charging: false)
         ringSessionManager.hrLogIntervalMinutes = ringSessionManager.hrLogIntervalMinutes ?? 5
         ringSessionManager.hrLogEnabled = ringSessionManager.hrLogEnabled ?? true
@@ -77,6 +78,7 @@ final class DemoDataGenerator {
 
         // Deactivate demo ring state
         ringSessionManager?.demoModeActive = false
+        influx.demoMode = false
         ringSessionManager?.currentBatteryInfo = nil
         ringSessionManager?.realTimeHeartRateBPM = nil
         ringSessionManager?.realTimeBloodOxygenPercent = nil

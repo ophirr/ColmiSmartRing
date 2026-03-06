@@ -130,6 +130,9 @@ class GymSessionManager {
         lastZoneTickTime = Date()
         previousZone = .rest
 
+        // Tag all data as exercising during workout
+        InfluxDBWriter.shared.activeTag = .exercising
+
         // Start real-time HR streaming from ring (skip in demo mode)
         if ringManager?.demoModeActive != true {
             ringManager?.startRealTimeStreaming(type: .heartRate)
@@ -214,6 +217,9 @@ class GymSessionManager {
         timerTask = nil
         continueTask = nil
         workoutState = .finished
+
+        // Clear activity tag
+        InfluxDBWriter.shared.activeTag = .none
 
         if hapticsEnabled {
             hapticNotification.notificationOccurred(.warning)
