@@ -29,7 +29,7 @@ final class DemoDataGenerator {
     private let emitInterval: TimeInterval = 10
 
     /// Running state for smooth Brownian-style drift.
-    private var baseHR: Double = 68
+    private var baseHR: Double = 112
     private var baseHRV: Double = 45
     private var baseSpO2: Double = 97.5
     private var baseStress: Double = 35
@@ -79,6 +79,7 @@ final class DemoDataGenerator {
         ringSessionManager?.demoModeActive = false
         ringSessionManager?.currentBatteryInfo = nil
         ringSessionManager?.realTimeHeartRateBPM = nil
+        ringSessionManager?.realTimeBloodOxygenPercent = nil
 
         debugPrint("[Demo] Stopped — \(samplesGenerated) samples generated")
     }
@@ -90,11 +91,11 @@ final class DemoDataGenerator {
         let tag = influx.activeTag
         let defaults = UserDefaults.standard
 
-        // Read tracking toggles
-        let hrEnabled = defaults.bool(forKey: "trackingSetting.heartRate")
-        let hrvEnabled = defaults.bool(forKey: "trackingSetting.hrv")
-        let spo2Enabled = defaults.bool(forKey: "trackingSetting.bloodOxygen")
-        let stressEnabled = defaults.bool(forKey: "trackingSetting.pressure")
+        // Read tracking toggles (default true for fresh installs)
+        let hrEnabled = defaults.object(forKey: "trackingSetting.heartRate") == nil || defaults.bool(forKey: "trackingSetting.heartRate")
+        let hrvEnabled = defaults.object(forKey: "trackingSetting.hrv") == nil || defaults.bool(forKey: "trackingSetting.hrv")
+        let spo2Enabled = defaults.object(forKey: "trackingSetting.bloodOxygen") == nil || defaults.bool(forKey: "trackingSetting.bloodOxygen")
+        let stressEnabled = defaults.object(forKey: "trackingSetting.pressure") == nil || defaults.bool(forKey: "trackingSetting.pressure")
 
         // --- Compute physiologically correlated values ---
 
@@ -105,9 +106,6 @@ final class DemoDataGenerator {
         baseHR = drift(baseHR, min: 48, max: 180, step: 1.5)
         let hr = clamp(baseHR + circadian * 12 + tagModifier.hrOffset + jitter(2), min: 45, max: 190)
         let bpm = Int(round(hr))
-
-        // Feed real-time HR for gym mode
-        ringSessionManager?.realTimeHeartRateBPM = bpm
 
         // HRV: inversely correlated with HR
         baseHRV = drift(baseHRV, min: 10, max: 120, step: 2.0)
@@ -122,6 +120,10 @@ final class DemoDataGenerator {
         baseStress = drift(baseStress, min: 5, max: 95, step: 2.5)
         let stressFromHR = max(0, (hr - 65) * 0.5)
         let stress = clamp((baseStress + stressFromHR) / 2.0 + tagModifier.stressOffset + jitter(3), min: 1, max: 100)
+
+        // Feed real-time HR and SpO2 for gym mode and metrics real-time cards
+        ringSessionManager?.realTimeHeartRateBPM = bpm
+        ringSessionManager?.realTimeBloodOxygenPercent = Int(round(spo2))
 
         // --- Write to InfluxDB (respecting toggles) ---
         if hrEnabled {

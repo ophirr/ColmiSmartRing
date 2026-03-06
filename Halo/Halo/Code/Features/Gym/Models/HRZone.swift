@@ -149,14 +149,15 @@ enum HRZone: Int, CaseIterable, Codable {
     }
 
     /// Darker variant for background gradients (dark mode).
+    /// These should be clearly visible as the zone color when used as gradient top.
     var darkColor: Color {
         switch self {
         case .rest:  return Color(red: 0.10, green: 0.10, blue: 0.12)
-        case .zone1: return Color(red: 0.22, green: 0.22, blue: 0.28)  // Cool gray
-        case .zone2: return Color(red: 0.0, green: 0.15, blue: 0.45)   // Deep blue
-        case .zone3: return Color(red: 0.0, green: 0.28, blue: 0.0)    // Deep green
-        case .zone4: return Color(red: 0.50, green: 0.22, blue: 0.0)   // Deep orange
-        case .zone5: return Color(red: 0.50, green: 0.0, blue: 0.0)    // Deep red
+        case .zone1: return Color(red: 0.35, green: 0.35, blue: 0.40)  // Visible gray
+        case .zone2: return Color(red: 0.0, green: 0.25, blue: 0.65)   // Rich blue
+        case .zone3: return Color(red: 0.0, green: 0.45, blue: 0.0)    // Rich green
+        case .zone4: return Color(red: 0.70, green: 0.30, blue: 0.0)   // Rich orange
+        case .zone5: return Color(red: 0.65, green: 0.0, blue: 0.0)    // Rich red
         }
     }
 
