@@ -63,6 +63,8 @@ struct ProfileScreenView: View {
                     }
                 }
 
+                DemoModeSectionView(ringSessionManager: ringSessionManager)
+
                 Section(L10n.Profile.debugSectionTitle) {
                     NavigationLink(destination: DebugView(ringSessionManager: ringSessionManager)) {
                         Label(L10n.Debug.navTitle, systemImage: "wrench.and.screwdriver.fill")

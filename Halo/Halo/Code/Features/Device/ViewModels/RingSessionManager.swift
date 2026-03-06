@@ -53,6 +53,10 @@ private let preferredDataTimeZoneIdentifierKey = "preferredDataTimeZoneIdentifie
 @Observable
 class RingSessionManager: NSObject {
     var peripheralConnected = false
+    /// When true, the app behaves as if a ring is connected (for demo/testing).
+    var demoModeActive = false
+    /// True when either a real ring is connected or demo mode is active.
+    var isEffectivelyConnected: Bool { peripheralConnected || demoModeActive }
     /// Latest real-time heart rate reading in bpm.
     var realTimeHeartRateBPM: Int?
     /// Latest real-time blood oxygen reading in percent.

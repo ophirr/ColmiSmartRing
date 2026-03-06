@@ -15,7 +15,8 @@ struct HRLogIntervalSectionView: View {
     @State private var sliderValue: Double = 5
     @State private var isSending = false
 
-    private var isConnected: Bool { ringSessionManager.peripheralConnected }
+    private var isConnected: Bool { ringSessionManager.isEffectivelyConnected }
+    private var isDemoMode: Bool { ringSessionManager.demoModeActive }
     private var ringInterval: Int? { ringSessionManager.hrLogIntervalMinutes }
     private var ringEnabled: Bool? { ringSessionManager.hrLogEnabled }
 
@@ -148,6 +149,12 @@ struct HRLogIntervalSectionView: View {
 
     private func sendSettings(enabled: Bool, interval: Int) {
         guard isConnected, !isSending else { return }
+        // In demo mode, just update local state — no BLE write
+        if isDemoMode {
+            ringSessionManager.hrLogIntervalMinutes = interval
+            ringSessionManager.hrLogEnabled = enabled
+            return
+        }
         isSending = true
         Task { @MainActor in
             defer { isSending = false }

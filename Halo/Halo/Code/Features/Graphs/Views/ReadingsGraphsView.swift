@@ -296,8 +296,9 @@ struct ReadingsGraphsView: View {
     private func heartRateDetailChart(log: StoredHeartRateLog) -> some View {
         let points: [HeartRateDataPoint] = (try? log.toHeartRateLog().heartRatesWithTimes())
             .map { $0.map { HeartRateDataPoint(heartRate: $0.0, time: $0.1) } } ?? []
+        let interval = ringSessionManager.hrLogIntervalMinutes ?? 5
         return VStack(alignment: .leading, spacing: 8) {
-            Text(L10n.Graphs.heartRateIntervals)
+            Text("Heart rate (\(interval)‑min intervals)")
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
             if points.isEmpty {

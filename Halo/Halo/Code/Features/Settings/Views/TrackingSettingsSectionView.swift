@@ -9,10 +9,10 @@ import SwiftUI
 
 struct TrackingSettingsSectionView: View {
     @Bindable var ringSessionManager: RingSessionManager
-    @AppStorage("trackingSetting.hrv") private var hrvEnabled = false
-    @AppStorage("trackingSetting.heartRate") private var heartRateEnabled = false
-    @AppStorage("trackingSetting.bloodOxygen") private var bloodOxygenEnabled = false
-    @AppStorage("trackingSetting.pressure") private var pressureEnabled = false
+    @AppStorage("trackingSetting.hrv") private var hrvEnabled = true
+    @AppStorage("trackingSetting.heartRate") private var heartRateEnabled = true
+    @AppStorage("trackingSetting.bloodOxygen") private var bloodOxygenEnabled = true
+    @AppStorage("trackingSetting.pressure") private var pressureEnabled = true
 
     var body: some View {
         Section(L10n.Settings.sectionTitle) {
@@ -20,7 +20,8 @@ struct TrackingSettingsSectionView: View {
                 trackingSettingRow(
                     setting: setting,
                     enabled: bindingForSetting(setting),
-                    isConnected: ringSessionManager.peripheralConnected,
+                    isConnected: ringSessionManager.isEffectivelyConnected,
+                    isDemoMode: ringSessionManager.demoModeActive,
                     writeTrackingSetting: ringSessionManager.writeTrackingSetting
                 )
             }
@@ -57,12 +58,15 @@ struct TrackingSettingsSectionView: View {
         setting: RingTrackingSetting,
         enabled: Binding<Bool>,
         isConnected: Bool,
+        isDemoMode: Bool,
         writeTrackingSetting: @escaping (RingTrackingSetting, Bool) async throws -> Void
     ) -> some View {
         let toggleBinding = Binding<Bool>(
             get: { enabled.wrappedValue },
             set: { newValue in
                 enabled.wrappedValue = newValue
+                // In demo mode, just toggle locally — no BLE write
+                guard !isDemoMode else { return }
                 Task { @MainActor in
                     do {
                         try await writeTrackingSetting(setting, newValue)
