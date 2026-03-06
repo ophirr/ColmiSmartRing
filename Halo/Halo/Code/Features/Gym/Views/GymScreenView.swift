@@ -30,15 +30,17 @@ struct GymScreenView: View {
         NavigationStack {
             ZStack {
                 // Full-screen zone gradient background
+                let isActive = gymManager.workoutState == .active || gymManager.workoutState == .paused
                 LinearGradient(
-                    colors: gymManager.workoutState == .active || gymManager.workoutState == .paused
-                        ? [zoneBackground, Color(red: 0.05, green: 0.05, blue: 0.08)]
+                    colors: isActive
+                        ? [zoneBackground, zoneBackground.opacity(0.4), Color(red: 0.05, green: 0.05, blue: 0.08)]
                         : [Color(red: 0.08, green: 0.08, blue: 0.12), Color(red: 0.05, green: 0.05, blue: 0.08)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
                 .ignoresSafeArea()
                 .animation(.easeInOut(duration: 0.8), value: gymManager.currentZone)
+                .animation(.easeInOut(duration: 0.5), value: isActive)
 
                 VStack(spacing: 0) {
                     switch gymManager.workoutState {
@@ -265,15 +267,14 @@ struct GymScreenView: View {
 
             Spacer()
         }
-        .onChange(of: showingSaveConfirm) { _, showing in
-            // Start 5-second countdown after save/discard alert is dismissed
-            if !showing && gymManager.workoutState == .finished {
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    if gymManager.workoutState == .finished {
-                        gymManager.resetToIdle()
-                    }
-                }
+        .task {
+            // Wait for save alert to dismiss, then auto-reset after 5 seconds
+            while showingSaveConfirm {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if gymManager.workoutState == .finished {
+                gymManager.resetToIdle()
             }
         }
     }
