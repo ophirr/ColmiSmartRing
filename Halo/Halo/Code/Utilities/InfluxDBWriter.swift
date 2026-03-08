@@ -161,8 +161,12 @@ final class InfluxDBWriter {
 
     /// Enqueue a single line-protocol string. Auto-flushes at batchSize.
     func write(_ lineProtocol: String) {
-        guard config != nil else { return }
+        guard config != nil else {
+            debugPrint("[InfluxDB] ⚠️ write() skipped — no config (not started). Line: \(lineProtocol.prefix(80))")
+            return
+        }
         buffer.append(lineProtocol)
+        debugPrint("[InfluxDB] Buffered 1 point (buffer=\(buffer.count)/\(batchSize))")
         if buffer.count >= batchSize {
             flush()
         }
@@ -170,8 +174,12 @@ final class InfluxDBWriter {
 
     /// Enqueue multiple line-protocol strings.
     func write(_ lines: [String]) {
-        guard config != nil else { return }
+        guard config != nil else {
+            debugPrint("[InfluxDB] ⚠️ write(\(lines.count)) skipped — no config (not started)")
+            return
+        }
         buffer.append(contentsOf: lines)
+        debugPrint("[InfluxDB] Buffered \(lines.count) points (buffer=\(buffer.count)/\(batchSize))")
         if buffer.count >= batchSize {
             flush()
         }
@@ -274,8 +282,10 @@ final class InfluxDBWriter {
         flushTimer?.invalidate()
         flushTimer = Timer.scheduledTimer(withTimeInterval: flushInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
+                debugPrint("[InfluxDB] Flush timer fired (buffer=\(self?.buffer.count ?? 0))")
                 self?.flush()
             }
         }
+        debugPrint("[InfluxDB] Flush timer started (every \(flushInterval)s)")
     }
 }

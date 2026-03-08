@@ -133,10 +133,8 @@ class GymSessionManager {
         // Tag all data as exercising during workout
         InfluxDBWriter.shared.activeTag = .exercising
 
-        // Start real-time HR streaming from ring (skip in demo mode)
-        if ringManager?.demoModeActive != true {
-            ringManager?.startRealTimeStreaming(type: .heartRate)
-        }
+        // Real-time HR stream is managed by RingSessionManager (started on connect,
+        // restarted each periodic sync). Gym just reads realTimeHeartRateBPM.
 
         // Start timer loop
         timerTask = Task { [weak self] in
@@ -144,17 +142,6 @@ class GymSessionManager {
                 try? await Task.sleep(nanoseconds: UInt64(Self.hrPollInterval * 1_000_000_000))
                 guard let self, !Task.isCancelled else { break }
                 self.tick()
-            }
-        }
-
-        // Send "continue" commands to keep the ring streaming
-        continueTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(Self.continueInterval * 1_000_000_000))
-                guard let self, !Task.isCancelled else { break }
-                if self.workoutState == .active && self.ringManager?.demoModeActive != true {
-                    self.ringManager?.continueRealTimeStreaming(type: .heartRate)
-                }
             }
         }
 
@@ -168,10 +155,6 @@ class GymSessionManager {
         guard workoutState == .active else { return }
         workoutState = .paused
         lastPauseStart = Date()
-        if ringManager?.demoModeActive != true {
-            ringManager?.stopRealTimeStreaming(type: .heartRate)
-        }
-        continueTask?.cancel()
 
         if hapticsEnabled {
             hapticLight.impactOccurred()
@@ -187,20 +170,6 @@ class GymSessionManager {
         workoutState = .active
         lastZoneTickTime = Date()
 
-        if ringManager?.demoModeActive != true {
-            ringManager?.startRealTimeStreaming(type: .heartRate)
-        }
-
-        continueTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(Self.continueInterval * 1_000_000_000))
-                guard let self, !Task.isCancelled else { break }
-                if self.workoutState == .active && self.ringManager?.demoModeActive != true {
-                    self.ringManager?.continueRealTimeStreaming(type: .heartRate)
-                }
-            }
-        }
-
         if hapticsEnabled {
             hapticLight.impactOccurred()
         }
@@ -209,9 +178,6 @@ class GymSessionManager {
     func stopWorkout() -> CompletedWorkout? {
         guard workoutState == .active || workoutState == .paused else { return nil }
 
-        if ringManager?.demoModeActive != true {
-            ringManager?.stopRealTimeStreaming(type: .heartRate)
-        }
         timerTask?.cancel()
         continueTask?.cancel()
         timerTask = nil
