@@ -136,8 +136,11 @@ struct HomeSummaryCardsView: View {
     private func metricCell(value: String, unit: String, color: Color) -> some View {
         VStack(spacing: 4) {
             Text(value)
-                .font(.system(size: 40, weight: .bold, design: .rounded))
+                .font(.system(size: value.count >= 5 ? 28 : value.count >= 4 ? 34 : 40,
+                              weight: .bold, design: .rounded))
                 .foregroundStyle(color)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
             Text(unit)
                 .font(.caption)
                 .foregroundStyle(.secondary)

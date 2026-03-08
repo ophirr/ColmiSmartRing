@@ -245,7 +245,6 @@ final class RingDataPersistenceCoordinator {
         let existingSamples = (try? modelContext.fetch(FetchDescriptor<StoredHRVSample>())) ?? []
         var inserted = 0
         var updated = 0
-        var newPoints: [TimeSeriesPoint] = []
         for point in series {
             if let existing = existingSamples.first(where: { $0.timestamp == point.time }) {
                 existing.value = point.value
@@ -253,13 +252,13 @@ final class RingDataPersistenceCoordinator {
             } else {
                 modelContext.insert(StoredHRVSample(timestamp: point.time, value: point.value))
                 inserted += 1
-                newPoints.append(point)
             }
         }
         tLog("[AutoPersist] HRV save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "HRV")
 
-        for point in newPoints {
+        // Always write all points — InfluxDB deduplicates by timestamp.
+        for point in series {
             influx.writeHRV(value: point.value, time: point.time)
         }
     }
@@ -268,7 +267,6 @@ final class RingDataPersistenceCoordinator {
         let existingSamples = (try? modelContext.fetch(FetchDescriptor<StoredStressSample>())) ?? []
         var inserted = 0
         var updated = 0
-        var newPoints: [TimeSeriesPoint] = []
         for point in series {
             if let existing = existingSamples.first(where: { $0.timestamp == point.time }) {
                 existing.value = point.value
@@ -276,13 +274,13 @@ final class RingDataPersistenceCoordinator {
             } else {
                 modelContext.insert(StoredStressSample(timestamp: point.time, value: point.value))
                 inserted += 1
-                newPoints.append(point)
             }
         }
         tLog("[AutoPersist] Stress save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "Stress")
 
-        for point in newPoints {
+        // Always write all points — InfluxDB deduplicates by timestamp.
+        for point in series {
             influx.writeStress(value: point.value, time: point.time)
         }
     }
@@ -290,13 +288,21 @@ final class RingDataPersistenceCoordinator {
     // MARK: - Blood oxygen
 
     private func decodeBloodOxygenPayload(_ payload: [UInt8]) -> [TimeSeriesPoint] {
-        guard payload.count >= 4 else { return [] }
+        // Payload is groups of 49 bytes: [dayIndex, 24×(max,min)].
+        // dayIndex: 0 = today, 1 = yesterday, 2 = two days ago, etc.
+        let groupSize = 49
+        guard payload.count >= groupSize else { return [] }
 
-        // Payloads observed on this firmware are mostly packed hourly min/max bytes.
-        // Use a pragmatic decode for current day instead of interpreting payload[1] as daysAgo
-        // (which produced implausible dates and invisible graph data).
-        let sampleBytes = Array(payload.dropFirst())
-        return decodeBloodOxygenHourlyPairs(sampleBytes: sampleBytes, daysAgo: 0)
+        var allPoints: [TimeSeriesPoint] = []
+        var offset = 0
+        while offset + groupSize <= payload.count {
+            let dayIndex = Int(payload[offset])
+            let sampleBytes = Array(payload[(offset + 1) ..< (offset + groupSize)])
+            let points = decodeBloodOxygenHourlyPairs(sampleBytes: sampleBytes, daysAgo: dayIndex)
+            allPoints.append(contentsOf: points)
+            offset += groupSize
+        }
+        return allPoints
     }
 
     private func decodeBloodOxygenHourlyPairs(sampleBytes: [UInt8], daysAgo: Int) -> [TimeSeriesPoint] {
@@ -304,10 +310,10 @@ final class RingDataPersistenceCoordinator {
         var hour = 0
         var i = 0
         while i + 1 < sampleBytes.count, hour < 24 {
-            let minV = Double(sampleBytes[i])
-            let maxV = Double(sampleBytes[i + 1])
-            let avg = (minV + maxV) / 2.0
-            if avg > 0 {
+            let maxV = Double(sampleBytes[i])
+            let minV = Double(sampleBytes[i + 1])
+            let avg = (maxV + minV) / 2.0
+            if avg >= 80 {  // Values below 80% indicate no data / ring not worn
                 points.append(TimeSeriesPoint(time: dayAtHour(daysAgo: daysAgo, hour: hour), value: avg))
             }
             i += 2
@@ -321,7 +327,6 @@ final class RingDataPersistenceCoordinator {
         let existingSamples = (try? modelContext.fetch(FetchDescriptor<StoredBloodOxygenSample>())) ?? []
         var inserted = 0
         var updated = 0
-        var newPoints: [TimeSeriesPoint] = []
         for point in series {
             if let existing = existingSamples.first(where: { $0.timestamp == point.time }) {
                 existing.value = point.value
@@ -329,13 +334,15 @@ final class RingDataPersistenceCoordinator {
             } else {
                 modelContext.insert(StoredBloodOxygenSample(timestamp: point.time, value: point.value))
                 inserted += 1
-                newPoints.append(point)
             }
         }
         tLog("[AutoPersist] Blood oxygen save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "BloodOxygen")
 
-        for point in newPoints {
+        // Always write all points to InfluxDB (not just new inserts).
+        // InfluxDB deduplicates by timestamp, so re-sending is safe and
+        // ensures data reaches InfluxDB even on re-syncs / updates.
+        for point in series {
             influx.writeSpO2(value: point.value, time: point.time)
         }
     }
