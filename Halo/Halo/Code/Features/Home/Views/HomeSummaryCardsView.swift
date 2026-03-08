@@ -15,6 +15,10 @@ struct HomeSummaryCardsView: View {
     var heartRateAverage: Int?
     /// Live heart rate from real-time stream (nil when not streaming).
     var currentBPM: Int?
+    /// Whether continuous HR streaming is active (controls card appearance).
+    var isStreaming: Bool = false
+    /// Called when the user taps the heart rate card.
+    var onHeartRateTap: (() -> Void)?
     /// Activity: steps, distance km, calories. Uses PreviewData when real data not yet available.
     var steps: Int
     var distanceKm: Double
@@ -83,9 +87,18 @@ struct HomeSummaryCardsView: View {
 
     private var heartRateCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(L10n.HomeSummary.heartRate, systemImage: "heart.fill")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
+            HStack {
+                Label(L10n.HomeSummary.heartRate, systemImage: "heart.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if isStreaming {
+                    Image(systemName: "waveform.path")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .symbolEffect(.variableColor.iterative, isActive: true)
+                }
+            }
             if let bpm = currentBPM, bpm > 0 {
                 Text("\(bpm) \(L10n.HomeSummary.bpm)")
                     .font(.title2.weight(.semibold))
@@ -93,6 +106,12 @@ struct HomeSummaryCardsView: View {
                     .contentTransition(.numericText())
                     .animation(.easeInOut(duration: 0.3), value: bpm)
                 Text("now")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else if isStreaming {
+                ProgressView()
+                    .controlSize(.small)
+                Text("measuring...")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             } else if let avg = heartRateAverage {
@@ -111,6 +130,7 @@ struct HomeSummaryCardsView: View {
         .padding()
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture { onHeartRateTap?() }
     }
 
     private func metricCell(value: String, unit: String, color: Color) -> some View {

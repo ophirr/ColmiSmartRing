@@ -59,6 +59,8 @@ class RingSessionManager: NSObject {
     var isEffectivelyConnected: Bool { peripheralConnected || demoModeActive }
     /// Set by GymSessionManager to prevent periodic sync from interrupting the real-time stream.
     var isWorkoutActive = false
+    /// User-toggled continuous HR streaming from the home screen.
+    var isContinuousHRStreamActive = false
     /// Latest real-time heart rate reading in bpm.
     var realTimeHeartRateBPM: Int?
     /// When the last command 105 heartRate packet arrived (including zeros).
@@ -782,9 +784,9 @@ extension RingSessionManager: CBPeripheralDelegate {
             }
         case RingSessionManager.CMD_STOP_REAL_TIME:
             // The ring auto-stops real-time streaming after ~60 s.
-            // If a workout is active, immediately restart with a fresh START.
-            if isWorkoutActive {
-                tLog("[RealTime] Ring auto-stopped stream — restarting for active workout")
+            // Restart if a workout or user-toggled continuous stream is active.
+            if isWorkoutActive || isContinuousHRStreamActive {
+                tLog("[RealTime] Ring auto-stopped stream — restarting (\(isWorkoutActive ? "workout" : "continuous"))")
                 startRealTimeStreaming(type: .realtimeHeartRate)
             } else {
                 tLog("[RealTime] Stream stopped — clearing live HR")
@@ -948,13 +950,11 @@ extension RingSessionManager {
         keepaliveWorkItem = nil
         guard peripheralConnected, characteristicsDiscovered else { return }
 
-        // During a workout the real-time HR stream is running.  Sending
-        // CMD_BATTERY mid-stream appears to disrupt the PPG sensor pipeline
-        // on the R02 firmware, causing the stream to die silently (no
-        // CMD_STOP, no zero packets — just silence).  Skip the battery
-        // read and reschedule; the next keepalive after the workout ends
-        // will pick up battery status.
-        if isWorkoutActive {
+        // During a workout or continuous stream the real-time HR stream is
+        // running.  Sending CMD_BATTERY mid-stream appears to disrupt the
+        // PPG sensor pipeline on the R02 firmware, causing the stream to
+        // die silently.  Skip the battery read and reschedule.
+        if isWorkoutActive || isContinuousHRStreamActive {
             tLog("[Keepalive] Workout active — skipping battery read to protect HR stream")
             scheduleNextKeepalive()
             return
@@ -1076,12 +1076,10 @@ extension RingSessionManager {
     private func runPeriodicSync() {
         guard peripheralConnected, characteristicsDiscovered else { return }
 
-        // During a gym workout, skip the periodic sync entirely.
-        // The real-time stream is managed by the CMD_STOP_REAL_TIME (106)
-        // auto-restart handler and the GymSessionManager watchdog.
-        // Sending ANY command (even a continue) mid-stream can disrupt it.
-        if isWorkoutActive {
-            tLog("[PeriodicSync] Workout active — skipping entirely")
+        // During a gym workout or continuous stream, skip the periodic sync
+        // entirely.  Sending ANY command mid-stream can disrupt the PPG sensor.
+        if isWorkoutActive || isContinuousHRStreamActive {
+            tLog("[PeriodicSync] Active stream — skipping entirely")
             return
         }
 
@@ -1355,8 +1353,25 @@ extension RingSessionManager {
 
     /// Start a brief real-time HR measurement.  The stream auto-stops as soon as
     /// the first valid (non-zero, ≤220) HR packet arrives, or after 15 s timeout.
+    /// Toggle continuous real-time HR streaming from the home screen.
+    func toggleContinuousHRStream() {
+        guard !isWorkoutActive else {
+            tLog("[ContinuousHR] Ignored — workout is active")
+            return
+        }
+        if isContinuousHRStreamActive {
+            tLog("[ContinuousHR] Stopping continuous stream")
+            isContinuousHRStreamActive = false
+            stopRealTimeStreaming(type: .realtimeHeartRate)
+        } else {
+            tLog("[ContinuousHR] Starting continuous stream")
+            isContinuousHRStreamActive = true
+            startRealTimeStreaming(type: .realtimeHeartRate)
+        }
+    }
+
     private func startSpotCheck() {
-        guard !isWorkoutActive else { return }
+        guard !isWorkoutActive, !isContinuousHRStreamActive else { return }
         tLog("[SpotCheck] Starting brief HR spot-check")
         spotCheckActive = true
         startRealTimeStreaming(type: .realtimeHeartRate)
