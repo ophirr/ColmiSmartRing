@@ -129,26 +129,44 @@ class RingSessionManager: NSObject {
         TimeZone(identifier: preferredDataTimeZoneIdentifier) ?? .current
     }
 
-    private let manager = CBCentralManager(delegate: nil, queue: nil)
+    private var manager: CBCentralManager!
     private var peripheral: CBPeripheral?
 
     private static let scanTimeout: TimeInterval = 15
     private var scanWorkItem: DispatchWorkItem?
 
-    /// Interval between keepalive battery reads.  The periodic sync timer and
-    /// real-time HR stream already keep the BLE connection alive, so this only
-    /// needs to cover long idle gaps.  5 minutes is plenty.
-    private static let keepaliveInterval: TimeInterval = 300
+    /// Interval between keepalive battery pings.  Each ping wakes the app from
+    /// background via the BLE response callback, forming a self-sustaining chain.
+    /// 60 s gives us ~1/min InfluxDB spot-checks even when the phone is locked.
+    private static let keepaliveInterval: TimeInterval = 60
     private var keepaliveWorkItem: DispatchWorkItem?
 
+    /// How many keepalive pings between full data syncs (HR log, HRV, SpO2, etc.).
+    /// With a 60 s keepalive, 5 = full sync every ~5 minutes.
+    private static let fullSyncEveryNPings: Int = 5
+    /// Counter incremented on each keepalive; triggers full sync when it hits fullSyncEveryNPings.
+    private var keepalivePingCount: Int = 0
+
     /// Periodic timer that re-syncs HR log (and other data) at the user's configured HR interval.
+    /// Used as a foreground fallback; the BLE keepalive chain is the primary background driver.
     private var periodicSyncTimer: Timer?
 
-    /// When true, the next valid real-time HR reading triggers an InfluxDB write
+    /// When true, the next valid real-time reading triggers an InfluxDB write
     /// and then auto-stops the stream.  Used for periodic spot-checks outside workouts.
     private var spotCheckActive = false
+    /// Which reading type the current spot-check is measuring (HR or temperature).
+    private var spotCheckType: RealTimeReading = .realtimeHeartRate
     /// Auto-stop the spot-check after this timeout even if no valid reading arrives.
     private var spotCheckTimeoutTask: Task<Void, Never>?
+
+    /// True while we're waiting for a battery response that was sent by the
+    /// keepalive chain.  Prevents `handleBatteryResponse` from driving the
+    /// chain when the battery read was triggered by `syncOnConnect` or
+    /// `getBatteryStatus` — which caused duplicate responses to pile up.
+    private var awaitingKeepaliveBatteryResponse = false
+
+    /// Auto-reconnect task after unexpected disconnection.
+    private var reconnectTask: Task<Void, Never>?
 
     /// Throttle real-time InfluxDB writes — 15s during workouts, 60s otherwise.
     private var lastInfluxHRWrite: Date = .distantPast
@@ -210,6 +228,7 @@ class RingSessionManager: NSObject {
     
 
     private let hrp = HeartRateLogParser()
+    private let healthHRWriter = AppleHealthHeartRateWriter()
 
     private var characteristicsDiscovered = false
 
@@ -288,7 +307,28 @@ class RingSessionManager: NSObject {
             self.preferredDataTimeZoneIdentifier = TimeZone.current.identifier
         }
         super.init()
-        manager.delegate = self
+        manager = CBCentralManager(
+            delegate: self,
+            queue: nil,
+            options: [CBCentralManagerOptionRestoreIdentifierKey: "com.halo.ring-central"]
+        )
+
+        // When the app returns to foreground (phone unlocked), trigger a reconnect
+        // if needed and run a sync + spot-check for a fresh InfluxDB reading.
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            tLog("[Foreground] App entering foreground")
+            if self.peripheralConnected, self.characteristicsDiscovered {
+                tLog("[Foreground] Connected — running sync + spot-check")
+                self.runPeriodicSync()
+            } else if self.savedRingIdentifier != nil, !self.peripheralConnected {
+                tLog("[Foreground] Disconnected — attempting reconnect")
+                self.findRingAgain()
+            }
+        }
     }
 
     // MARK: - RingSessionManager actions
@@ -431,6 +471,8 @@ class RingSessionManager: NSObject {
 
     func disconnect() {
         guard let peripheral, manager.state == .poweredOn else { return }
+        reconnectTask?.cancel()  // User-initiated — don't auto-reconnect
+        reconnectTask = nil
         manager.cancelPeripheralConnection(peripheral)
     }
 
@@ -478,6 +520,19 @@ class RingSessionManager: NSObject {
 
 // MARK: - CBCentralManagerDelegate
 extension RingSessionManager: CBCentralManagerDelegate {
+
+    /// Called when the app is relaunched by iOS after being terminated.
+    /// CoreBluetooth restores the peripheral references that were active.
+    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        tLog("[Restore] CoreBluetooth restoring state")
+        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
+           let restored = peripherals.first {
+            tLog("[Restore] Restored peripheral: \(restored.identifier)")
+            self.peripheral = restored
+            restored.delegate = self
+        }
+    }
+
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         tLog("Central manager state: \(central.state)")
         switch central.state {
@@ -533,6 +588,8 @@ extension RingSessionManager: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         stopScanningForRing()
+        reconnectTask?.cancel()
+        reconnectTask = nil
         if peripheralConnected {
             return
         }
@@ -566,12 +623,38 @@ extension RingSessionManager: CBCentralManagerDelegate {
         uartTxCharacteristic = nil
         colmiWriteCharacteristic = nil
         colmiNotifyCharacteristic = nil
+        isContinuousHRStreamActive = false
+        spotCheckActive = false
+        spotCheckTimeoutTask?.cancel()
+        spotCheckTimeoutTask = nil
+        awaitingKeepaliveBatteryResponse = false
         stopKeepalive()
         stopPeriodicSync()
+
+        // Auto-reconnect if we have a saved ring (unexpected disconnect, e.g. phone locked).
+        if savedRingIdentifier != nil {
+            tLog("[Reconnect] Unexpected disconnect — will attempt to reconnect in 2s")
+            reconnectTask?.cancel()
+            reconnectTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self, !Task.isCancelled, !self.peripheralConnected else { return }
+                tLog("[Reconnect] Attempting reconnect…")
+                self.findRingAgain()
+            }
+        }
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: (any Error)?) {
-        tLog("Failed to connect to peripheral: \(peripheral), error: \(error.debugDescription)")
+        tLog("[Reconnect] Failed to connect: \(error.debugDescription)")
+        if savedRingIdentifier != nil {
+            tLog("[Reconnect] Will retry in 5s…")
+            reconnectTask?.cancel()
+            reconnectTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self, !Task.isCancelled, !self.peripheralConnected else { return }
+                self.findRingAgain()
+            }
+        }
     }
 }
 
@@ -639,7 +722,9 @@ extension RingSessionManager: CBPeripheralDelegate {
         characteristicsDiscovered = (uartRxCharacteristic != nil && uartTxCharacteristic != nil)
         if characteristicsDiscovered && !wasReady {
             syncOnConnect()
-            startKeepalive()
+            // Keepalive chain is started at the end of ensureHRLogSettings()
+            // (called by syncOnConnect) so it doesn't overlap with the
+            // initial sync and spot-check.
             DispatchQueue.main.async { [weak self] in
                 self?.onReadyForSettingsQuery?()
             }
@@ -712,17 +797,21 @@ extension RingSessionManager: CBPeripheralDelegate {
                     }
                     realTimeHeartRateBPM = Int(readingValue)
 
-                    // Spot-check: got a valid reading — write to InfluxDB and stop.
-                    if spotCheckActive {
-                        tLog("[SpotCheck] Got HR \(readingValue) — writing to InfluxDB and stopping stream")
+                    // Spot-check: got a valid reading — write to InfluxDB + Apple Health and stop.
+                    if spotCheckActive && spotCheckType == .realtimeHeartRate {
+                        tLog("[SpotCheck] Got HR \(readingValue) — writing to InfluxDB/HealthKit and stopping stream")
                         spotCheckActive = false
                         spotCheckTimeoutTask?.cancel()
                         spotCheckTimeoutTask = nil
                         lastInfluxHRWrite = now
+                        let bpm = Int(readingValue)
                         Task { @MainActor in
-                            InfluxDBWriter.shared.writeHeartRates([(bpm: Int(readingValue), time: now)])
+                            InfluxDBWriter.shared.writeHeartRates([(bpm: bpm, time: now)])
+                            await self.healthHRWriter.writeHeartRate(bpm: bpm, time: now)
                         }
                         stopRealTimeStreaming(type: .realtimeHeartRate)
+                        // Continue the keepalive chain now that the spot-check is done.
+                        scheduleNextKeepalive()
                         break
                     }
 
@@ -733,8 +822,13 @@ extension RingSessionManager: CBPeripheralDelegate {
                         }
                     }
                 case .spo2:
+                    // R02 firmware does not support real-time SpO2 streaming
+                    // (always returns 0).  SpO2 data comes from historical
+                    // hourly logs instead.  We still update the UI if a
+                    // non-zero value somehow arrives.
                     guard readingValue > 0 else { break }
                     realTimeBloodOxygenPercent = Int(readingValue)
+
                     if now.timeIntervalSince(lastInfluxSpO2Write) >= currentInfluxWriteInterval {
                         lastInfluxSpO2Write = now
                         Task { @MainActor in
@@ -747,6 +841,23 @@ extension RingSessionManager: CBPeripheralDelegate {
                     guard readingValue > 0 else { break }
                     let celsius = (Double(readingValue) + 200.0) / 10.0
                     realTimeTemperatureCelsius = celsius
+
+                    // Spot-check: got a valid temperature — write and stop.
+                    if spotCheckActive && spotCheckType == .temperature {
+                        tLog("[SpotCheck] Got temp \(celsius)°C — writing to InfluxDB/HealthKit and stopping stream")
+                        spotCheckActive = false
+                        spotCheckTimeoutTask?.cancel()
+                        spotCheckTimeoutTask = nil
+                        lastInfluxTempWrite = now
+                        Task { @MainActor in
+                            InfluxDBWriter.shared.writeTemperature(celsius: celsius, time: now)
+                            await self.healthHRWriter.writeTemperature(celsius: celsius, time: now)
+                        }
+                        stopRealTimeStreaming(type: .temperature)
+                        scheduleNextKeepalive()
+                        break
+                    }
+
                     if now.timeIntervalSince(lastInfluxTempWrite) >= currentInfluxWriteInterval {
                         lastInfluxTempWrite = now
                         Task { @MainActor in
@@ -927,9 +1038,18 @@ extension RingSessionManager {
 // MARK: - Keepalive
 
 extension RingSessionManager {
-    /// Start sending periodic keepalives (e.g. battery request) so the BLE link doesn't drop from idle timeout.
+    // MARK: - BLE-event-driven keepalive chain
+    //
+    // The app sends CMD_BATTERY → ring responds → didUpdateValueFor wakes the
+    // app (even from background) → handleBatteryResponse fires a spot-check
+    // and schedules the next ping.  This forms a self-sustaining chain that
+    // keeps InfluxDB fed ~1/min even when the phone is locked.
+
     func startKeepalive() {
         stopKeepalive()
+        keepalivePingCount = 0
+        // First ping after the full keepalive interval.  syncOnConnect has
+        // already fired a spot-check, so there's no rush.
         scheduleNextKeepalive()
     }
 
@@ -938,12 +1058,14 @@ extension RingSessionManager {
         keepaliveWorkItem = nil
     }
 
-    private func scheduleNextKeepalive() {
+    private func scheduleNextKeepalive(delay: TimeInterval? = nil) {
+        let delay = delay ?? Self.keepaliveInterval
+        keepaliveWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             self?.sendKeepalive()
         }
         keepaliveWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.keepaliveInterval, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     private func sendKeepalive() {
@@ -955,19 +1077,31 @@ extension RingSessionManager {
         // PPG sensor pipeline on the R02 firmware, causing the stream to
         // die silently.  Skip the battery read and reschedule.
         if isWorkoutActive || isContinuousHRStreamActive {
-            tLog("[Keepalive] Workout active — skipping battery read to protect HR stream")
+            tLog("[Keepalive] Active stream — skipping battery read, rescheduling")
             scheduleNextKeepalive()
             return
         }
 
+        tLog("[Keepalive] Sending battery ping #\(keepalivePingCount + 1)")
+        awaitingKeepaliveBatteryResponse = true
         do {
             let packet = try makePacket(command: Self.CMD_BATTERY)
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
         } catch {
-            tLog("Keepalive packet failed: \(error)")
+            tLog("[Keepalive] Packet failed: \(error)")
+            awaitingKeepaliveBatteryResponse = false
         }
-        scheduleNextKeepalive()
+        // Don't schedule next here — handleBatteryResponse will do it when
+        // the ring responds, keeping the chain BLE-event-driven.
+        // Safety net: if the ring doesn't respond within 30 s, retry.
+        let fallback = DispatchWorkItem { [weak self] in
+            guard let self, self.keepaliveWorkItem == nil else { return }
+            tLog("[Keepalive] No battery response in 30s — retrying")
+            self.sendKeepalive()
+        }
+        keepaliveWorkItem = fallback
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: fallback)
     }
 }
 
@@ -1051,9 +1185,20 @@ extension RingSessionManager {
         if isWorkoutActive {
             tLog("[SyncOnConnect] Workout active — starting real-time HR stream")
             startRealTimeStreaming(type: .realtimeHeartRate)
+        } else if isContinuousHRStreamActive {
+            tLog("[SyncOnConnect] Continuous stream was active — restarting")
+            startRealTimeStreaming(type: .realtimeHeartRate)
+        } else if !spotCheckActive {
+            tLog("[SyncOnConnect] Running spot-check for fresh InfluxDB reading")
+            startSpotCheck()
         } else {
-            tLog("[SyncOnConnect] No workout — relying on ring's periodic HR logging")
+            tLog("[SyncOnConnect] Spot-check already active — skipping")
         }
+
+        // Start the keepalive chain now that the initial sync is done.
+        // The first ping fires after the full keepalive interval (60 s),
+        // giving the spot-check above time to finish without overlap.
+        startKeepalive()
     }
 
     /// Start a repeating timer that re-fetches HR log (and other metrics) from the ring.
@@ -1073,21 +1218,22 @@ extension RingSessionManager {
         periodicSyncTimer = nil
     }
 
+    /// Foreground-only fallback sync.  The BLE keepalive chain handles background
+    /// spot-checks; this Timer-based sync covers the case where the chain stalls
+    /// while the app is in the foreground (e.g. during long idle periods).
     private func runPeriodicSync() {
         guard peripheralConnected, characteristicsDiscovered else { return }
 
-        // During a gym workout or continuous stream, skip the periodic sync
-        // entirely.  Sending ANY command mid-stream can disrupt the PPG sensor.
         if isWorkoutActive || isContinuousHRStreamActive {
             tLog("[PeriodicSync] Active stream — skipping entirely")
             return
         }
 
-        tLog("[PeriodicSync] Syncing HR log, HRV, SpO2, stress, activity…")
+        tLog("[PeriodicSync] Foreground fallback sync")
 
-        // Fire a brief spot-check: start DataType=6, grab one valid HR reading,
-        // write to InfluxDB, then auto-stop.  Green LED flashes for ~5-10 s.
-        startSpotCheck()
+        if !spotCheckActive {
+            startSpotCheck()
+        }
 
         getHeartRateLog { _ in }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
@@ -1370,20 +1516,23 @@ extension RingSessionManager {
         }
     }
 
-    private func startSpotCheck() {
+    private func startSpotCheck(type: RealTimeReading = .realtimeHeartRate) {
         guard !isWorkoutActive, !isContinuousHRStreamActive else { return }
-        tLog("[SpotCheck] Starting brief HR spot-check")
+        tLog("[SpotCheck] Starting brief \(type) spot-check")
         spotCheckActive = true
-        startRealTimeStreaming(type: .realtimeHeartRate)
+        spotCheckType = type
+        startRealTimeStreaming(type: type)
 
         // Safety timeout — stop after 15 s even if no valid reading arrives.
         spotCheckTimeoutTask?.cancel()
         spotCheckTimeoutTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 15_000_000_000)
             guard let self, !Task.isCancelled, self.spotCheckActive else { return }
-            tLog("[SpotCheck] Timeout — stopping stream without a valid reading")
+            tLog("[SpotCheck] Timeout — stopping \(type) stream without a valid reading")
             self.spotCheckActive = false
-            self.stopRealTimeStreaming(type: .realtimeHeartRate)
+            self.stopRealTimeStreaming(type: type)
+            // Continue the keepalive chain even though this check failed.
+            self.scheduleNextKeepalive()
         }
     }
     
@@ -1436,15 +1585,63 @@ extension RingSessionManager {
             tLog("Invalid battery packet received.")
             return
         }
-        
+
         let batteryLevel = Int(packet[1])
         let charging = packet[2] != 0
         let batteryInfo = BatteryInfo(batteryLevel: batteryLevel, charging: charging)
         currentBatteryInfo = batteryInfo
-        
+
         // Trigger stored callback with battery info
         batteryStatusCallback?(batteryInfo)
         batteryStatusCallback = nil
+
+        // --- BLE-event-driven chain ---
+        // Only drive the keepalive chain if this response is from a keepalive
+        // battery ping.  Battery reads from syncOnConnect / getBatteryStatus
+        // must NOT trigger spot-checks or reschedule the chain — that caused
+        // duplicate responses to pile up (every ~10 s instead of 60 s).
+        guard awaitingKeepaliveBatteryResponse else { return }
+        awaitingKeepaliveBatteryResponse = false
+
+        keepalivePingCount += 1
+
+        // Alternate spot-checks: odd pings → HR, even pings → temperature.
+        // (R02 firmware does not support real-time SpO2, so we skip that.)
+        if !isWorkoutActive && !isContinuousHRStreamActive && !spotCheckActive {
+            let type: RealTimeReading = (keepalivePingCount % 2 == 1) ? .realtimeHeartRate : .temperature
+            startSpotCheck(type: type)
+            // Don't schedule next keepalive now — it will be scheduled when
+            // the spot-check finishes (or times out).  This prevents piling
+            // up battery pings while the PPG sensor is still measuring.
+        } else {
+            // Stream active or another spot-check in progress — just reschedule.
+            scheduleNextKeepalive()
+        }
+
+        // Full data sync (HR log, HRV, SpO2, etc.) every N pings.
+        if keepalivePingCount >= Self.fullSyncEveryNPings {
+            keepalivePingCount = 0
+            if !isWorkoutActive && !isContinuousHRStreamActive {
+                tLog("[Keepalive] Full sync triggered (every \(Self.fullSyncEveryNPings) pings)")
+                // Stagger syncs so commands don't pile up on the ring.
+                // Start after 20 s — gives the spot-check time to finish first.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+                    self?.getHeartRateLog { _ in }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 22) { [weak self] in
+                    self?.syncHRVData(dayOffset: 0)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 24) { [weak self] in
+                    self?.syncBloodOxygen(dayOffset: 0)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 26) { [weak self] in
+                    self?.syncPressureData(dayOffset: 0)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 28) { [weak self] in
+                    self?.syncActivityData(dayOffset: 0)
+                }
+            }
+        }
     }
 }
 
