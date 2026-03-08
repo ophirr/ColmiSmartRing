@@ -245,6 +245,7 @@ final class RingDataPersistenceCoordinator {
         let existingSamples = (try? modelContext.fetch(FetchDescriptor<StoredHRVSample>())) ?? []
         var inserted = 0
         var updated = 0
+        var newPoints: [TimeSeriesPoint] = []
         for point in series {
             if let existing = existingSamples.first(where: { $0.timestamp == point.time }) {
                 existing.value = point.value
@@ -252,12 +253,13 @@ final class RingDataPersistenceCoordinator {
             } else {
                 modelContext.insert(StoredHRVSample(timestamp: point.time, value: point.value))
                 inserted += 1
+                newPoints.append(point)
             }
         }
         debugPrint("[AutoPersist] HRV save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "HRV")
 
-        for point in series {
+        for point in newPoints {
             influx.writeHRV(value: point.value, time: point.time)
         }
     }
@@ -266,6 +268,7 @@ final class RingDataPersistenceCoordinator {
         let existingSamples = (try? modelContext.fetch(FetchDescriptor<StoredStressSample>())) ?? []
         var inserted = 0
         var updated = 0
+        var newPoints: [TimeSeriesPoint] = []
         for point in series {
             if let existing = existingSamples.first(where: { $0.timestamp == point.time }) {
                 existing.value = point.value
@@ -273,12 +276,13 @@ final class RingDataPersistenceCoordinator {
             } else {
                 modelContext.insert(StoredStressSample(timestamp: point.time, value: point.value))
                 inserted += 1
+                newPoints.append(point)
             }
         }
         debugPrint("[AutoPersist] Stress save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "Stress")
 
-        for point in series {
+        for point in newPoints {
             influx.writeStress(value: point.value, time: point.time)
         }
     }
@@ -317,6 +321,7 @@ final class RingDataPersistenceCoordinator {
         let existingSamples = (try? modelContext.fetch(FetchDescriptor<StoredBloodOxygenSample>())) ?? []
         var inserted = 0
         var updated = 0
+        var newPoints: [TimeSeriesPoint] = []
         for point in series {
             if let existing = existingSamples.first(where: { $0.timestamp == point.time }) {
                 existing.value = point.value
@@ -324,12 +329,13 @@ final class RingDataPersistenceCoordinator {
             } else {
                 modelContext.insert(StoredBloodOxygenSample(timestamp: point.time, value: point.value))
                 inserted += 1
+                newPoints.append(point)
             }
         }
         debugPrint("[AutoPersist] Blood oxygen save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "BloodOxygen")
 
-        for point in series {
+        for point in newPoints {
             influx.writeSpO2(value: point.value, time: point.time)
         }
     }
