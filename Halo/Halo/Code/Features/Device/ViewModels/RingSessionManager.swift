@@ -57,8 +57,30 @@ class RingSessionManager: NSObject {
     var demoModeActive = false
     /// True when either a real ring is connected or demo mode is active.
     var isEffectivelyConnected: Bool { peripheralConnected || demoModeActive }
+    /// Set by GymSessionManager to prevent periodic sync from interrupting the real-time stream.
+    var isWorkoutActive = false
     /// Latest real-time heart rate reading in bpm.
     var realTimeHeartRateBPM: Int?
+    /// When the last command 105 heartRate packet arrived (including zeros).
+    /// Used by GymSessionManager to detect when the stream has gone silent.
+    var lastRealTimeHRPacketTime: Date?
+    /// When the last sport real-time (0x73) packet arrived.
+    /// Used by GymSessionManager to distinguish "stream dead" from
+    /// "HR stream displaced by sport telemetry" (ring still on wrist, exercising).
+    var lastSportRTPacketTime: Date?
+
+    // MARK: Sport RT heartbeat counter (hypothesis: byte[10] = cumulative beat count)
+
+    /// Estimated HR derived from the sport RT beat counter (byte[10]).
+    /// Updated each 0x73 packet via a sliding window over the last ~10 seconds.
+    /// nil until enough data has accumulated for a reliable estimate.
+    var sportRTDerivedHR: Int?
+
+    /// Ring buffer of (timestamp, byte10) samples used to compute sportRTDerivedHR.
+    private var sportRTBeatSamples: [(time: Date, b10: UInt8)] = []
+
+    /// How many seconds of history to use for the sliding-window HR estimate.
+    private let sportRTWindowSeconds: TimeInterval = 10.0
     /// Latest real-time blood oxygen reading in percent.
     var realTimeBloodOxygenPercent: Int?
     /// Latest real-time body temperature in °C (e.g. 36.3).
@@ -117,11 +139,6 @@ class RingSessionManager: NSObject {
 
     /// Periodic timer that re-syncs HR log (and other data) at the user's configured HR interval.
     private var periodicSyncTimer: Timer?
-
-    /// Timer that sends "continue" commands to keep the real-time HR stream alive.
-    /// The ring auto-stops streaming after a few seconds without a continue.
-    private static let realTimeContinueInterval: TimeInterval = 4.0
-    private var realTimeContinueTimer: Timer?
 
     /// Throttle real-time InfluxDB writes to once per minute.
     private var lastInfluxHRWrite: Date = .distantPast
@@ -522,9 +539,12 @@ extension RingSessionManager: CBCentralManagerDelegate {
         debugPrint("Disconnected from peripheral: \(peripheral), error: \(error.debugDescription)")
         peripheralConnected = false
         realTimeHeartRateBPM = nil
+        lastRealTimeHRPacketTime = nil
+        lastSportRTPacketTime = nil
+        sportRTDerivedHR = nil
+        sportRTBeatSamples.removeAll()
         realTimeBloodOxygenPercent = nil
         realTimeTemperatureCelsius = nil
-        stopRealTimeContinueTimer()
         characteristicsDiscovered = false
         uartRxCharacteristic = nil
         uartTxCharacteristic = nil
@@ -655,8 +675,25 @@ extension RingSessionManager: CBPeripheralDelegate {
 
                 switch readingType {
                 case .heartRate:
-                    // Ignore zero readings (sensor warmup / no contact)
-                    guard readingValue > 0 else { break }
+                    // Stamp every HR packet (including zeros) so the gym
+                    // watchdog can distinguish "stream alive but warming up"
+                    // from "stream has gone silent".
+                    lastRealTimeHRPacketTime = now
+
+                    if readingValue == 0 {
+                        // Zero = sensor warmup / no skin contact.
+                        // During a workout, nil-out so the gym UI shows the
+                        // warmup indicator instead of a frozen stale value.
+                        if isWorkoutActive { realTimeHeartRateBPM = nil }
+                        break
+                    }
+                    // Sanity-check: discard physiologically impossible values.
+                    // 0xFF (255) is a known firmware artefact; valid resting-to-max
+                    // range is roughly 30-220 BPM.
+                    guard readingValue <= 220 else {
+                        debugPrint("[RealTime] Ignoring out-of-range HR: \(readingValue)")
+                        break
+                    }
                     realTimeHeartRateBPM = Int(readingValue)
                     if now.timeIntervalSince(lastInfluxHRWrite) >= influxWriteInterval {
                         lastInfluxHRWrite = now
@@ -693,7 +730,15 @@ extension RingSessionManager: CBPeripheralDelegate {
                 debugPrint("Error in reading - Type: \(readingType), Error Code: \(errorCode)")
             }
         case RingSessionManager.CMD_STOP_REAL_TIME:
-            // Acknowledgement that real-time streaming was stopped — no action needed
+            // The ring auto-stops real-time streaming after ~60 s.
+            // If a workout is active, immediately restart with a fresh START.
+            // NOTE: CONTINUE (action=3) was tried but on R02 firmware it still
+            // triggers a full ~30 s PPG warmup, so START is equally effective
+            // and more reliable.  No delay — the ring has already stopped.
+            if isWorkoutActive {
+                debugPrint("[RealTime] Ring auto-stopped stream — restarting for active workout")
+                startRealTimeStreaming(type: .heartRate)
+            }
             break
         case RingSessionManager.CMD_SLEEP_DATA:
             handleSleepDataResponse(packet: packet)
@@ -870,23 +915,36 @@ extension RingSessionManager {
         getBatteryStatus { _ in }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self else { return }
+            // Skip if a workout started while we were waiting — BLE sync
+            // commands flood the channel and disrupt the real-time HR stream.
+            guard !self.isWorkoutActive else {
+                debugPrint("[SyncOnConnect] Workout active — skipping sleep sync")
+                return
+            }
             self.syncSleep(dayOffset: 0)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            guard let self else { return }
+            guard let self, !self.isWorkoutActive else {
+                debugPrint("[SyncOnConnect] Workout active — skipping HR log sync")
+                return
+            }
             self.getHeartRateLog { _ in }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
-            self?.syncHRVData(dayOffset: 0)
+            guard let self, !self.isWorkoutActive else { return }
+            self.syncHRVData(dayOffset: 0)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
-            self?.syncBloodOxygen(dayOffset: 0)
+            guard let self, !self.isWorkoutActive else { return }
+            self.syncBloodOxygen(dayOffset: 0)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            self?.syncPressureData(dayOffset: 0)
+            guard let self, !self.isWorkoutActive else { return }
+            self.syncPressureData(dayOffset: 0)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) { [weak self] in
-            self?.syncActivityData(dayOffset: 0)
+            guard let self, !self.isWorkoutActive else { return }
+            self.syncActivityData(dayOffset: 0)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) { [weak self] in
             guard let self else { return }
@@ -921,9 +979,15 @@ extension RingSessionManager {
 
         startPeriodicSync(intervalMinutes: savedInterval)
 
-        // Start continuous real-time HR streaming so we get per-minute data points
-        debugPrint("[SyncOnConnect] Starting real-time HR stream")
-        startRealTimeStreaming(type: .heartRate)
+        // Start continuous real-time HR streaming so we get per-minute data points.
+        // Skip if a workout is already running — GymSessionManager owns the stream
+        // and sending another START here would reset the PPG sensor mid-warmup.
+        if isWorkoutActive {
+            debugPrint("[SyncOnConnect] Workout active — skipping real-time stream start")
+        } else {
+            debugPrint("[SyncOnConnect] Starting real-time HR stream")
+            startRealTimeStreaming(type: .heartRate)
+        }
     }
 
     /// Start a repeating timer that re-fetches HR log (and other metrics) from the ring.
@@ -945,6 +1009,16 @@ extension RingSessionManager {
 
     private func runPeriodicSync() {
         guard peripheralConnected, characteristicsDiscovered else { return }
+
+        // During a gym workout, skip the periodic sync entirely.
+        // The real-time stream is managed by the CMD_STOP_REAL_TIME (106)
+        // auto-restart handler and the GymSessionManager watchdog.
+        // Sending ANY command (even a continue) mid-stream can disrupt it.
+        if isWorkoutActive {
+            debugPrint("[PeriodicSync] Workout active — skipping entirely")
+            return
+        }
+
         debugPrint("[PeriodicSync] Syncing HR log, HRV, SpO2, stress, activity…")
         // Restart the real-time HR stream (ring auto-stops after ~2 min)
         startRealTimeStreaming(type: .heartRate)
@@ -1113,44 +1187,63 @@ extension RingSessionManager {
 
 extension RingSessionManager {
     /// Handle sport real-time packets (command 115 / 0x73).
-    /// These arrive automatically during exercise and contain HR + SpO2.
+    /// These arrive autonomously when the ring's firmware detects exercise.
     /// Packet layout (observed):
-    ///   [0] = 115 (command)
-    ///   [1] = 18  (sub-type / flags — constant so far)
-    ///   [2..3] = 0 (reserved)
-    ///   [4] = heart rate BPM
-    ///   [5] = 0
-    ///   [6..7] = PPG signal (little-endian uint16, raw sensor)
-    ///   [8..9] = 0
-    ///   [10] = SpO2 percentage (or secondary HR — tracks ~packet[4] minus 10-13)
+    ///   [0]    = 115 (command)
+    ///   [1]    = 18  (sub-type / flags — constant so far)
+    ///   [2]    = 0
+    ///   [3]    = 0
+    ///   [4]    = cumulative counter (wraps at 256, ~steps or activity ticks)
+    ///   [5]    = 0
+    ///   [6]    = slow counter (increments ~1 per 3 packets)
+    ///   [7]    = fast counter (increments ~58 per packet, wraps at 256)
+    ///   [8]    = 0
+    ///   [9]    = 0 (was 4 in earlier captures — possibly sport type)
+    ///   [10]   = possible cumulative heartbeat counter (HYPOTHESIS — under test)
     ///   [11..14] = 0
-    ///   [15] = checksum
+    ///   [15]   = checksum
+    ///
+    /// HYPOTHESIS: byte[10] is a cumulative heartbeat counter.  In a captured
+    /// 18-second session it incremented at ~60/min, which is a plausible resting
+    /// HR.  We derive an estimated HR via a sliding window over the last 10 s
+    /// and expose it as `sportRTDerivedHR` so GymSessionManager can use it when
+    /// the 0x69 HR stream is displaced.
     func handleSportRealTimeResponse(packet: [UInt8]) {
         guard packet.count >= 11 else { return }
-        let hr = Int(packet[4])
-        let spo2 = Int(packet[10])
+        let now = Date()
+        lastSportRTPacketTime = now
 
-        if hr > 0 {
-            realTimeHeartRateBPM = hr
-            let now = Date()
-            if now.timeIntervalSince(lastInfluxHRWrite) >= influxWriteInterval {
-                lastInfluxHRWrite = now
-                Task { @MainActor in
-                    InfluxDBWriter.shared.writeHeartRates([(bpm: hr, time: now)])
+        let b4  = packet[4]
+        let b10 = packet[10]
+
+        // ── Sliding-window HR from byte[10] ──────────────────────────
+        sportRTBeatSamples.append((time: now, b10: b10))
+
+        // Trim samples older than the window
+        let cutoff = now.addingTimeInterval(-sportRTWindowSeconds)
+        sportRTBeatSamples.removeAll { $0.time < cutoff }
+
+        if let first = sportRTBeatSamples.first, sportRTBeatSamples.count >= 3 {
+            let elapsed = now.timeIntervalSince(first.time)
+            if elapsed >= 3.0 {
+                // Unwrap the counter (it's UInt8, wraps at 256)
+                var totalBeats = 0
+                for i in 1 ..< sportRTBeatSamples.count {
+                    var delta = Int(sportRTBeatSamples[i].b10) - Int(sportRTBeatSamples[i - 1].b10)
+                    if delta < 0 { delta += 256 }  // handle wrap
+                    totalBeats += delta
+                }
+                let derivedBPM = Int(round(Double(totalBeats) * 60.0 / elapsed))
+                // Sanity: only accept 30-220 BPM
+                if derivedBPM >= 30 && derivedBPM <= 220 {
+                    sportRTDerivedHR = derivedBPM
+                } else {
+                    sportRTDerivedHR = nil
                 }
             }
         }
 
-        if spo2 > 0, spo2 <= 100 {
-            realTimeBloodOxygenPercent = spo2
-            let now = Date()
-            if now.timeIntervalSince(lastInfluxSpO2Write) >= influxWriteInterval {
-                lastInfluxSpO2Write = now
-                Task { @MainActor in
-                    InfluxDBWriter.shared.writeSpO2(value: Double(spo2), time: now)
-                }
-            }
-        }
+        debugPrint("[SportRT] b4=\(b4) b10=\(b10) derivedHR=\(sportRTDerivedHR.map(String.init) ?? "nil") samples=\(sportRTBeatSamples.count) pkt=\(packet.prefix(11).map { String($0) }.joined(separator: ","))")
     }
 }
 
@@ -1161,33 +1254,18 @@ extension RingSessionManager {
     //    CONTINUE_HEART_RATE_PACKET = make_packet(CMD_REAL_TIME_HEART_RATE, bytearray(b"3"))
     
     func startRealTimeStreaming(type: RealTimeReading) {
+        debugPrint("[RealTime] START \(type)")
         sendRealTimeCommand(command: RingSessionManager.CMD_START_REAL_TIME, type: type, action: .start)
-        startRealTimeContinueTimer(type: type)
     }
 
     func continueRealTimeStreaming(type: RealTimeReading) {
+        debugPrint("[RealTime] CONTINUE \(type)")
         sendRealTimeCommand(command: RingSessionManager.CMD_START_REAL_TIME, type: type, action: .continue)
     }
 
     func stopRealTimeStreaming(type: RealTimeReading) {
-        stopRealTimeContinueTimer()
+        debugPrint("[RealTime] STOP \(type)")
         sendRealTimeCommand(command: RingSessionManager.CMD_STOP_REAL_TIME, type: type, action: nil)
-    }
-
-    /// Periodically send "continue" so the ring doesn't auto-stop the real-time stream.
-    private func startRealTimeContinueTimer(type: RealTimeReading) {
-        stopRealTimeContinueTimer()
-        realTimeContinueTimer = Timer.scheduledTimer(withTimeInterval: Self.realTimeContinueInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.peripheralConnected else { return }
-                self.continueRealTimeStreaming(type: type)
-            }
-        }
-    }
-
-    private func stopRealTimeContinueTimer() {
-        realTimeContinueTimer?.invalidate()
-        realTimeContinueTimer = nil
     }
     
     private func sendRealTimeCommand(command: UInt8, type: RealTimeReading, action: Action?) {
