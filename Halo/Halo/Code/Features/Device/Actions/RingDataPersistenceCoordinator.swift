@@ -45,7 +45,9 @@ final class RingDataPersistenceCoordinator {
         }
         ringSessionManager.bigDataBloodOxygenPayloadPersistenceCallback = { [weak self] payload in
             guard let self else { return }
+            debugPrint("[AutoPersist] Blood oxygen payload (\(payload.count) bytes): \(payload.prefix(20).map { String($0) }.joined(separator: ","))\(payload.count > 20 ? "…" : "")")
             let decoded = self.decodeBloodOxygenPayload(payload)
+            debugPrint("[AutoPersist] Blood oxygen decoded \(decoded.count) valid points from \(payload.count) byte payload")
             self.persistBloodOxygenSeries(decoded)
         }
     }
@@ -144,12 +146,16 @@ final class RingDataPersistenceCoordinator {
             action = "INSERT"
         }
 
-        debugPrint("[AutoPersist] Heart rate log save requested. action=\(action) dayStart=\(formatDate(dayStart))")
+        let nonZeroCount = log.heartRates.filter { $0 > 0 }.count
+        debugPrint("[AutoPersist] Heart rate log save requested. action=\(action) dayStart=\(formatDate(dayStart)) range=\(log.range)min nonZero=\(nonZeroCount)/\(log.heartRates.count)")
         _ = saveContext(tag: "HeartRate")
 
         // Stream to InfluxDB
         if let readings = try? log.heartRatesWithTimes() {
+            debugPrint("[AutoPersist] HR log → InfluxDB: \(readings.count) non-zero readings")
             influx.writeHeartRates(readings.map { (bpm: $0.0, time: $0.1) })
+        } else {
+            debugPrint("[AutoPersist] HR log → InfluxDB: heartRatesWithTimes() failed or empty")
         }
     }
 

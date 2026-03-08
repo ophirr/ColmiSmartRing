@@ -228,6 +228,11 @@ final class InfluxDBWriter {
 
         let body = buffer.joined(separator: "\n")
         let count = buffer.count
+        let measurements = Set(buffer.compactMap { $0.components(separatedBy: ",").first })
+        debugPrint("[InfluxDB] Flushing \(count) points (measurements: \(measurements.sorted())) to \(demoMode ? "demo" : "prod") → \(url.absoluteString)")
+        for (idx, line) in buffer.enumerated() {
+            debugPrint("[InfluxDB]   [\(idx)] \(line)")
+        }
         buffer.removeAll(keepingCapacity: true)
 
         var request = URLRequest(url: url)
