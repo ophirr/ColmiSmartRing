@@ -22,7 +22,7 @@ final class AppleHealthGymWriter {
     /// Call this when the user taps "Save" after stopping a workout.
     func writeGymSession(_ session: StoredGymSession) async {
         guard HKHealthStore.isHealthDataAvailable() else {
-            debugPrint("[HealthKit/Gym] Health data not available on this device")
+            tLog("[HealthKit/Gym] Health data not available on this device")
             return
         }
 
@@ -31,17 +31,17 @@ final class AppleHealthGymWriter {
 
             // 1. Build and save the workout
             let workout = try await saveWorkout(session)
-            debugPrint("[HealthKit/Gym] Workout saved: \(workout.uuid)")
+            tLog("[HealthKit/Gym] Workout saved: \(workout.uuid)")
 
             // 2. Build HR samples and associate with workout
             let hrSamples = makeHeartRateSamples(session)
             if !hrSamples.isEmpty {
                 try await associate(samples: hrSamples, with: workout)
-                debugPrint("[HealthKit/Gym] \(hrSamples.count) HR samples associated with workout")
+                tLog("[HealthKit/Gym] \(hrSamples.count) HR samples associated with workout")
             }
 
         } catch {
-            debugPrint("[HealthKit/Gym] Failed to write: \(error)")
+            tLog("[HealthKit/Gym] Failed to write: \(error)")
         }
     }
 

@@ -103,19 +103,19 @@ struct ProfileScreenView: View {
             let deletedBloodOxygen = try deleteAll(StoredBloodOxygenSample.self)
             let deletedStress = try deleteAll(StoredStressSample.self)
 
-            debugPrint("======= SWIFTDATA SAVE: Delete All =======")
-            debugPrint("deleted StoredSleepPeriod: \(deletedSleepPeriods)")
-            debugPrint("deleted StoredSleepDay: \(deletedSleepDays)")
-            debugPrint("deleted StoredHeartRateLog: \(deletedHeartRateLogs)")
-            debugPrint("deleted StoredActivitySample: \(deletedActivity)")
-            debugPrint("deleted StoredHRVSample: \(deletedHRV)")
-            debugPrint("deleted StoredBloodOxygenSample: \(deletedBloodOxygen)")
-            debugPrint("deleted StoredStressSample: \(deletedStress)")
+            tLog("======= SWIFTDATA SAVE: Delete All =======")
+            tLog("deleted StoredSleepPeriod: \(deletedSleepPeriods)")
+            tLog("deleted StoredSleepDay: \(deletedSleepDays)")
+            tLog("deleted StoredHeartRateLog: \(deletedHeartRateLogs)")
+            tLog("deleted StoredActivitySample: \(deletedActivity)")
+            tLog("deleted StoredHRVSample: \(deletedHRV)")
+            tLog("deleted StoredBloodOxygenSample: \(deletedBloodOxygen)")
+            tLog("deleted StoredStressSample: \(deletedStress)")
             try modelContext.save()
-            debugPrint("result: SUCCESS")
-            debugPrint("==========================================")
+            tLog("result: SUCCESS")
+            tLog("==========================================")
         } catch {
-            debugPrint("Failed to delete local SwiftData: \(error)")
+            tLog("Failed to delete local SwiftData: \(error)")
         }
     }
 

@@ -45,9 +45,9 @@ final class RingDataPersistenceCoordinator {
         }
         ringSessionManager.bigDataBloodOxygenPayloadPersistenceCallback = { [weak self] payload in
             guard let self else { return }
-            debugPrint("[AutoPersist] Blood oxygen payload (\(payload.count) bytes): \(payload.prefix(20).map { String($0) }.joined(separator: ","))\(payload.count > 20 ? "…" : "")")
+            tLog("[AutoPersist] Blood oxygen payload (\(payload.count) bytes): \(payload.prefix(20).map { String($0) }.joined(separator: ","))\(payload.count > 20 ? "…" : "")")
             let decoded = self.decodeBloodOxygenPayload(payload)
-            debugPrint("[AutoPersist] Blood oxygen decoded \(decoded.count) valid points from \(payload.count) byte payload")
+            tLog("[AutoPersist] Blood oxygen decoded \(decoded.count) valid points from \(payload.count) byte payload")
             self.persistBloodOxygenSeries(decoded)
         }
     }
@@ -96,7 +96,7 @@ final class RingDataPersistenceCoordinator {
             }
         }
 
-        debugPrint("[AutoPersist] Sleep save requested. insertedDays=\(insertedDays) updatedDays=\(updatedDays)")
+        tLog("[AutoPersist] Sleep save requested. insertedDays=\(insertedDays) updatedDays=\(updatedDays)")
         if saveContext(tag: "Sleep") {
             Task { @MainActor in
                 await healthSleepWriter.writeSleepDays(bigData.days, todayStart: today)
@@ -147,15 +147,15 @@ final class RingDataPersistenceCoordinator {
         }
 
         let nonZeroCount = log.heartRates.filter { $0 > 0 }.count
-        debugPrint("[AutoPersist] Heart rate log save requested. action=\(action) dayStart=\(formatDate(dayStart)) range=\(log.range)min nonZero=\(nonZeroCount)/\(log.heartRates.count)")
+        tLog("[AutoPersist] Heart rate log save requested. action=\(action) dayStart=\(formatDate(dayStart)) range=\(log.range)min nonZero=\(nonZeroCount)/\(log.heartRates.count)")
         _ = saveContext(tag: "HeartRate")
 
         // Stream to InfluxDB
         if let readings = try? log.heartRatesWithTimes() {
-            debugPrint("[AutoPersist] HR log → InfluxDB: \(readings.count) non-zero readings")
+            tLog("[AutoPersist] HR log → InfluxDB: \(readings.count) non-zero readings")
             influx.writeHeartRates(readings.map { (bpm: $0.0, time: $0.1) })
         } else {
-            debugPrint("[AutoPersist] HR log → InfluxDB: heartRatesWithTimes() failed or empty")
+            tLog("[AutoPersist] HR log → InfluxDB: heartRatesWithTimes() failed or empty")
         }
     }
 
@@ -189,7 +189,7 @@ final class RingDataPersistenceCoordinator {
 
         // Ignore metadata/empty activity packets.
         guard steps > 0 || distanceMeters > 0 || calories > 0 else {
-            debugPrint("[AutoPersist] Activity packet ignored (empty): \(packet)")
+            tLog("[AutoPersist] Activity packet ignored (empty): \(packet)")
             return
         }
 
@@ -209,7 +209,7 @@ final class RingDataPersistenceCoordinator {
             action = "INSERT"
         }
 
-        debugPrint("[AutoPersist] Activity save requested. action=\(action) ts=\(formatDate(timestamp)) steps=\(steps) kcal=\(calories) distKm=\(distanceKm)")
+        tLog("[AutoPersist] Activity save requested. action=\(action) ts=\(formatDate(timestamp)) steps=\(steps) kcal=\(calories) distKm=\(distanceKm)")
         if saveContext(tag: "Activity") {
             Task { @MainActor in
                 await healthActivityWriter.writeActivitySample(timestamp: timestamp, steps: steps, calories: calories)
@@ -256,7 +256,7 @@ final class RingDataPersistenceCoordinator {
                 newPoints.append(point)
             }
         }
-        debugPrint("[AutoPersist] HRV save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
+        tLog("[AutoPersist] HRV save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "HRV")
 
         for point in newPoints {
@@ -279,7 +279,7 @@ final class RingDataPersistenceCoordinator {
                 newPoints.append(point)
             }
         }
-        debugPrint("[AutoPersist] Stress save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
+        tLog("[AutoPersist] Stress save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "Stress")
 
         for point in newPoints {
@@ -332,7 +332,7 @@ final class RingDataPersistenceCoordinator {
                 newPoints.append(point)
             }
         }
-        debugPrint("[AutoPersist] Blood oxygen save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
+        tLog("[AutoPersist] Blood oxygen save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "BloodOxygen")
 
         for point in newPoints {
@@ -353,10 +353,10 @@ final class RingDataPersistenceCoordinator {
     private func saveContext(tag: String) -> Bool {
         do {
             try modelContext.save()
-            debugPrint("[AutoPersist] SwiftData save SUCCESS (\(tag))")
+            tLog("[AutoPersist] SwiftData save SUCCESS (\(tag))")
             return true
         } catch {
-            debugPrint("[AutoPersist] SwiftData save FAILED (\(tag)): \(error)")
+            tLog("[AutoPersist] SwiftData save FAILED (\(tag)): \(error)")
             return false
         }
     }

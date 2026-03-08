@@ -516,17 +516,17 @@ struct ReadingsGraphsView: View {
             modelContext.insert(StoredActivitySample(timestamp: timestamp, steps: steps, distanceKm: distanceKm, calories: calories))
             action = "INSERT"
         }
-        debugPrint("========== SWIFTDATA SAVE: Activity ==========")
-        debugPrint("action: \(action)")
-        debugPrint("timestamp: \(swiftDataLogDate(timestamp))")
-        debugPrint("steps: \(steps), distanceKm: \(distanceKm), calories: \(calories)")
+        tLog("========== SWIFTDATA SAVE: Activity ==========")
+        tLog("action: \(action)")
+        tLog("timestamp: \(swiftDataLogDate(timestamp))")
+        tLog("steps: \(steps), distanceKm: \(distanceKm), calories: \(calories)")
         do {
             try modelContext.save()
-            debugPrint("result: SUCCESS")
+            tLog("result: SUCCESS")
         } catch {
-            debugPrint("result: FAILED - \(error)")
+            tLog("result: FAILED - \(error)")
         }
-        debugPrint("==============================================")
+        tLog("==============================================")
     }
 
     private func persistHRVSeries(_ series: [TimeSeriesPoint]) {
@@ -541,17 +541,17 @@ struct ReadingsGraphsView: View {
                 inserted.append(point)
             }
         }
-        debugPrint("============ SWIFTDATA SAVE: HRV =============")
-        debugPrint("inserted: \(inserted.count), updated: \(updated.count), totalSeriesPoints: \(series.count)")
-        debugPrint("insertedPoints: \(formatSeriesPointsForLog(inserted))")
-        debugPrint("updatedPoints: \(formatSeriesPointsForLog(updated))")
+        tLog("============ SWIFTDATA SAVE: HRV =============")
+        tLog("inserted: \(inserted.count), updated: \(updated.count), totalSeriesPoints: \(series.count)")
+        tLog("insertedPoints: \(formatSeriesPointsForLog(inserted))")
+        tLog("updatedPoints: \(formatSeriesPointsForLog(updated))")
         do {
             try modelContext.save()
-            debugPrint("result: SUCCESS")
+            tLog("result: SUCCESS")
         } catch {
-            debugPrint("result: FAILED - \(error)")
+            tLog("result: FAILED - \(error)")
         }
-        debugPrint("==============================================")
+        tLog("==============================================")
     }
 
     private func persistBloodOxygenSeries(_ series: [TimeSeriesPoint]) {
@@ -566,17 +566,17 @@ struct ReadingsGraphsView: View {
                 inserted.append(point)
             }
         }
-        debugPrint("====== SWIFTDATA SAVE: Blood Oxygen ======")
-        debugPrint("inserted: \(inserted.count), updated: \(updated.count), totalSeriesPoints: \(series.count)")
-        debugPrint("insertedPoints: \(formatSeriesPointsForLog(inserted))")
-        debugPrint("updatedPoints: \(formatSeriesPointsForLog(updated))")
+        tLog("====== SWIFTDATA SAVE: Blood Oxygen ======")
+        tLog("inserted: \(inserted.count), updated: \(updated.count), totalSeriesPoints: \(series.count)")
+        tLog("insertedPoints: \(formatSeriesPointsForLog(inserted))")
+        tLog("updatedPoints: \(formatSeriesPointsForLog(updated))")
         do {
             try modelContext.save()
-            debugPrint("result: SUCCESS")
+            tLog("result: SUCCESS")
         } catch {
-            debugPrint("result: FAILED - \(error)")
+            tLog("result: FAILED - \(error)")
         }
-        debugPrint("==========================================")
+        tLog("==========================================")
     }
 
     private func persistStressSeries(_ series: [TimeSeriesPoint]) {
@@ -591,17 +591,17 @@ struct ReadingsGraphsView: View {
                 inserted.append(point)
             }
         }
-        debugPrint("=========== SWIFTDATA SAVE: Stress ===========")
-        debugPrint("inserted: \(inserted.count), updated: \(updated.count), totalSeriesPoints: \(series.count)")
-        debugPrint("insertedPoints: \(formatSeriesPointsForLog(inserted))")
-        debugPrint("updatedPoints: \(formatSeriesPointsForLog(updated))")
+        tLog("=========== SWIFTDATA SAVE: Stress ===========")
+        tLog("inserted: \(inserted.count), updated: \(updated.count), totalSeriesPoints: \(series.count)")
+        tLog("insertedPoints: \(formatSeriesPointsForLog(inserted))")
+        tLog("updatedPoints: \(formatSeriesPointsForLog(updated))")
         do {
             try modelContext.save()
-            debugPrint("result: SUCCESS")
+            tLog("result: SUCCESS")
         } catch {
-            debugPrint("result: FAILED - \(error)")
+            tLog("result: FAILED - \(error)")
         }
-        debugPrint("==============================================")
+        tLog("==============================================")
     }
 
     private func swiftDataLogDate(_ date: Date) -> String {

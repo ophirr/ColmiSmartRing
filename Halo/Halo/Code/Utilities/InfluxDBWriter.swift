@@ -113,7 +113,7 @@ final class InfluxDBWriter {
     var activeTag: ActivityTag = .none {
         didSet {
             UserDefaults.standard.set(activeTag.rawValue, forKey: "influxdb.activeTag")
-            debugPrint("[InfluxDB] Tag changed → \(activeTag.displayName)")
+            tLog("[InfluxDB] Tag changed → \(activeTag.displayName)")
         }
     }
 
@@ -133,10 +133,10 @@ final class InfluxDBWriter {
         activeTag = .none
         config = InfluxDBConfig.saved
         guard config != nil else {
-            debugPrint("[InfluxDB] No config found — cloud sync disabled. Set influxdb.token in UserDefaults.")
+            tLog("[InfluxDB] No config found — cloud sync disabled. Set influxdb.token in UserDefaults.")
             return
         }
-        debugPrint("[InfluxDB] Started — writing to \(config!.bucket)@\(config!.url)")
+        tLog("[InfluxDB] Started — writing to \(config!.bucket)@\(config!.url)")
         startFlushTimer()
     }
 
@@ -145,7 +145,7 @@ final class InfluxDBWriter {
         let cfg = InfluxDBConfig(url: url, org: org, bucket: bucket, demoBucket: Secrets.influxDBDemoBucket, token: token)
         cfg.save()
         config = cfg
-        debugPrint("[InfluxDB] Configured — writing to \(bucket)@\(url)")
+        tLog("[InfluxDB] Configured — writing to \(bucket)@\(url)")
         startFlushTimer()
     }
 
@@ -154,7 +154,7 @@ final class InfluxDBWriter {
         flushTimer = nil
         flush()
         config = nil
-        debugPrint("[InfluxDB] Stopped")
+        tLog("[InfluxDB] Stopped")
     }
 
     // MARK: - Write points
@@ -162,7 +162,7 @@ final class InfluxDBWriter {
     /// Enqueue a single line-protocol string. Auto-flushes at batchSize.
     func write(_ lineProtocol: String) {
         guard config != nil else {
-            debugPrint("[InfluxDB] ⚠️ write() skipped — no config (not started)")
+            tLog("[InfluxDB] ⚠️ write() skipped — no config (not started)")
             return
         }
         buffer.append(lineProtocol)
@@ -174,7 +174,7 @@ final class InfluxDBWriter {
     /// Enqueue multiple line-protocol strings.
     func write(_ lines: [String]) {
         guard config != nil else {
-            debugPrint("[InfluxDB] ⚠️ write(\(lines.count)) skipped — no config (not started)")
+            tLog("[InfluxDB] ⚠️ write(\(lines.count)) skipped — no config (not started)")
             return
         }
         buffer.append(contentsOf: lines)
@@ -233,14 +233,14 @@ final class InfluxDBWriter {
     func flush() {
         guard let config, !buffer.isEmpty else { return }
         guard let url = config.writeURL(demo: demoMode) else {
-            debugPrint("[InfluxDB] Invalid write URL")
+            tLog("[InfluxDB] Invalid write URL")
             return
         }
 
         let body = buffer.joined(separator: "\n")
         let count = buffer.count
         let measurements = Set(buffer.compactMap { $0.components(separatedBy: ",").first })
-        debugPrint("[InfluxDB] Flushing \(count) points (\(measurements.sorted().joined(separator: ", "))) to \(demoMode ? "demo" : "prod")")
+        tLog("[InfluxDB] Flushing \(count) points (\(measurements.sorted().joined(separator: ", "))) to \(demoMode ? "demo" : "prod")")
         buffer.removeAll(keepingCapacity: true)
 
         var request = URLRequest(url: url)
@@ -254,17 +254,17 @@ final class InfluxDBWriter {
             DispatchQueue.main.async {
                 if let error {
                     self?.totalErrors += count
-                    debugPrint("[InfluxDB] Write failed (\(count) points): \(error.localizedDescription)")
+                    tLog("[InfluxDB] Write failed (\(count) points): \(error.localizedDescription)")
                     return
                 }
                 if let http = response as? HTTPURLResponse {
                     if http.statusCode == 204 {
                         self?.totalWritten += count
-                        debugPrint("[InfluxDB] Wrote \(count) points (total: \(self?.totalWritten ?? 0))")
+                        tLog("[InfluxDB] Wrote \(count) points (total: \(self?.totalWritten ?? 0))")
                     } else {
                         self?.totalErrors += count
                         let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? "no body"
-                        debugPrint("[InfluxDB] Write error HTTP \(http.statusCode): \(body)")
+                        tLog("[InfluxDB] Write error HTTP \(http.statusCode): \(body)")
                     }
                 }
             }

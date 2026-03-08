@@ -57,7 +57,7 @@ final class DemoDataGenerator {
         ringSessionManager.hrLogIntervalMinutes = ringSessionManager.hrLogIntervalMinutes ?? 5
         ringSessionManager.hrLogEnabled = ringSessionManager.hrLogEnabled ?? true
 
-        debugPrint("[Demo] Started — emitting every \(Int(emitInterval))s")
+        tLog("[Demo] Started — emitting every \(Int(emitInterval))s")
 
         // Backfill today's HR log so the chart has data immediately
         backfillTodayHR(context: modelContext)
@@ -85,7 +85,7 @@ final class DemoDataGenerator {
         ringSessionManager?.realTimeBloodOxygenPercent = nil
         ringSessionManager?.realTimeTemperatureCelsius = nil
 
-        debugPrint("[Demo] Stopped — \(samplesGenerated) samples generated")
+        tLog("[Demo] Stopped — \(samplesGenerated) samples generated")
     }
 
     // MARK: - Sample Generation
@@ -181,7 +181,7 @@ final class DemoDataGenerator {
                           spo2Enabled ? "SpO2:\(String(format:"%.1f", spo2))" : nil,
                           stressEnabled ? "Stress:\(String(format:"%.1f", stress))" : nil]
                 .compactMap { $0 }.joined(separator: " ")
-            debugPrint("[Demo] #\(samplesGenerated) \(active) tag:\(tag.displayName) bat:\(demoBatteryLevel)%")
+            tLog("[Demo] #\(samplesGenerated) \(active) tag:\(tag.displayName) bat:\(demoBatteryLevel)%")
         }
     }
 
@@ -287,7 +287,7 @@ final class DemoDataGenerator {
         influx.writeHeartRates(hrReadings)
         influx.flush()
 
-        debugPrint("[Demo] Backfilled \(slotsToFill) HR slots + \(hoursToFill)h of HRV/SpO2/Stress")
+        tLog("[Demo] Backfilled \(slotsToFill) HR slots + \(hoursToFill)h of HRV/SpO2/Stress")
     }
 
     // MARK: - Physiological Models
