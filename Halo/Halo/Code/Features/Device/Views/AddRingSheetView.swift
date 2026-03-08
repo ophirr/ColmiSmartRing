@@ -25,6 +25,28 @@ struct AddRingSheetView: View {
                             .dynamicTypeSize(...DynamicTypeSize.accessibility3)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if !ringSessionManager.isDiscovering && ringSessionManager.discoveredPeripherals.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.secondary)
+                        Text("No rings found")
+                            .font(.headline)
+                        Text("Make sure your ring is charged, nearby, and not connected to another device.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                        Button {
+                            ringSessionManager.startDiscovery()
+                        } label: {
+                            Text("Try Again")
+                                .font(.headline.weight(.semibold))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .padding(.top, 8)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     List {
                         ForEach(ringSessionManager.discoveredPeripherals, id: \.identifier) { peripheral in

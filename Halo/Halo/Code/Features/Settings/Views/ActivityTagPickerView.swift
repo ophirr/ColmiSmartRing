@@ -17,6 +17,8 @@ struct ActivityTagPickerView: View {
         GridItem(.flexible())
     ]
 
+    private let refreshTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
     var body: some View {
         Section {
             LazyVGrid(columns: columns, spacing: 10) {
@@ -36,6 +38,17 @@ struct ActivityTagPickerView: View {
             Text(selectedTag == .none
                  ? "No tag applied — data streams without activity context."
                  : "Tagging all data as \"\(selectedTag.displayName)\". Change anytime — tags apply to new samples only.")
+        }
+        .onReceive(refreshTimer) { _ in
+            let current = InfluxDBWriter.shared.activeTag
+            if current != selectedTag {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    selectedTag = current
+                }
+            }
+        }
+        .onAppear {
+            selectedTag = InfluxDBWriter.shared.activeTag
         }
     }
 }

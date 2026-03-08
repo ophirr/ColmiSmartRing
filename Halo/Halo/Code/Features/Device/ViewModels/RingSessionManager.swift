@@ -248,6 +248,8 @@ class RingSessionManager: NSObject {
         isDiscovering = true
         if manager.state == .poweredOn {
             actuallyStartScan()
+        } else {
+            debugPrint("[Discovery] Waiting for BLE (state=\(manager.state.rawValue))")
         }
     }
 
@@ -263,6 +265,17 @@ class RingSessionManager: NSObject {
 
     private func actuallyStartScan() {
         guard manager.state == .poweredOn else { return }
+        // Rings already connected at the iOS level won't appear in a scan,
+        // so retrieve them by known service UUIDs first.
+        let alreadyConnected = manager.retrieveConnectedPeripherals(withServices: [
+            CBUUID(string: Self.ringServiceUUID),
+            CBUUID(string: Self.colmiServiceUUID)
+        ])
+        for p in alreadyConnected where isColmiRingName(p.name ?? "") {
+            if !discoveredPeripherals.contains(where: { $0.identifier == p.identifier }) {
+                discoveredPeripherals.append(p)
+            }
+        }
         manager.scanForPeripherals(withServices: nil, options: nil)
         scanWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
@@ -274,8 +287,13 @@ class RingSessionManager: NSObject {
 
     /// Connect to a discovered peripheral and save it as the ring (persist identifier).
     func connectAndSaveRing(peripheral p: CBPeripheral) {
-        guard manager.state == .poweredOn else { return }
+        debugPrint("[Connect] connectAndSaveRing called – manager.state=\(manager.state.rawValue), peripheral.state=\(p.state.rawValue)")
+        guard manager.state == .poweredOn else {
+            debugPrint("[Connect] ⚠️ Manager not powered on, aborting")
+            return
+        }
         if p.state == .connected || p.state == .connecting {
+            debugPrint("[Connect] ⚠️ Already connected/connecting, skipping")
             return
         }
         stopDiscovery()
@@ -285,6 +303,7 @@ class RingSessionManager: NSObject {
             CBConnectPeripheralOptionNotifyOnConnectionKey: true,
             CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
         ])
+        debugPrint("[Connect] Connection request sent")
     }
 
     func removeRing() {
@@ -311,7 +330,18 @@ class RingSessionManager: NSObject {
                 known.delegate = self
                 connect()
             } else {
-                startScanningForRing()
+                // Also check for peripherals already connected at the system level.
+                let connected = manager.retrieveConnectedPeripherals(withServices: [
+                    CBUUID(string: Self.ringServiceUUID),
+                    CBUUID(string: Self.colmiServiceUUID)
+                ])
+                if let match = connected.first(where: { $0.identifier == savedRingIdentifier }) {
+                    peripheral = match
+                    match.delegate = self
+                    connect()
+                } else {
+                    startScanningForRing()
+                }
             }
         }
     }
@@ -420,10 +450,18 @@ extension RingSessionManager: CBCentralManagerDelegate {
         }
     }
 
+    private func isColmiRingName(_ name: String) -> Bool {
+        let upper = name.uppercased()
+        return upper.hasPrefix(SmartRingBLE.deviceNamePrefix.uppercased())
+            || upper.hasPrefix(SmartRingBLE.deviceNamePrefixAlt.uppercased())
+    }
+
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        let name = peripheral.name ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? ""
+        // peripheral.name can be nil on first discovery; prefer the advertisement local name.
+        let advName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
+        let name = advName ?? peripheral.name ?? ""
         if isDiscovering {
-            guard name.hasPrefix(SmartRingBLE.deviceNamePrefix) else { return }
+            guard isColmiRingName(name) else { return }
             if !discoveredPeripherals.contains(where: { $0.identifier == peripheral.identifier }) {
                 discoveredPeripherals.append(peripheral)
             }
@@ -462,11 +500,15 @@ extension RingSessionManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: (any Error)?) {
-        debugPrint("Disconnected from peripheral: \(peripheral)")
+        debugPrint("Disconnected from peripheral: \(peripheral), error: \(error.debugDescription)")
         peripheralConnected = false
         realTimeHeartRateBPM = nil
         realTimeBloodOxygenPercent = nil
         characteristicsDiscovered = false
+        uartRxCharacteristic = nil
+        uartTxCharacteristic = nil
+        colmiWriteCharacteristic = nil
+        colmiNotifyCharacteristic = nil
         stopKeepalive()
     }
 

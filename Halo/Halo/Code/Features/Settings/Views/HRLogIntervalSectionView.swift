@@ -159,6 +159,11 @@ struct HRLogIntervalSectionView: View {
         Task { @MainActor in
             defer { isSending = false }
             do {
+                if enabled {
+                    // Ensure the Heart Rate tracking setting (command 22) is also
+                    // enabled so the ring's PPG sensor is active for logging.
+                    try await ringSessionManager.writeTrackingSetting(.heartRate, enabled: true)
+                }
                 try await ringSessionManager.writeHRLogSettings(enabled: enabled, intervalMinutes: interval)
             } catch {
                 debugPrint("[HRLogInterval] Write failed: \(error)")
