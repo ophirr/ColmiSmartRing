@@ -913,8 +913,8 @@ extension RingSessionManager {
     private func runPeriodicSync() {
         guard peripheralConnected, characteristicsDiscovered else { return }
         debugPrint("[PeriodicSync] Syncing HR log, HRV, SpO2, stress, activity…")
-        // Keep the real-time HR stream alive
-        continueRealTimeStreaming(type: .heartRate)
+        // Restart the real-time HR stream (ring auto-stops after ~2 min)
+        startRealTimeStreaming(type: .heartRate)
         getHeartRateLog { _ in }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             self?.syncHRVData(dayOffset: 0)
