@@ -50,6 +50,7 @@ struct HomeScreenView: View {
                     HomeSummaryCardsView(
                         sleepDurationMinutes: latestSleepDurationMinutes,
                         heartRateAverage: todayHeartRateAverage,
+                        currentBPM: ringSessionManager.realTimeHeartRateBPM,
                         steps: latestActivity?.steps ?? PreviewData.activitySummary.steps,
                         distanceKm: latestActivity?.distanceKm ?? PreviewData.activitySummary.distanceKm,
                         calories: latestActivity?.calories ?? PreviewData.activitySummary.calories,

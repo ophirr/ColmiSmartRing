@@ -213,6 +213,10 @@ class GymSessionManager {
         continueTask = nil
         workoutState = .finished
 
+        // Explicitly stop the real-time HR stream so the ring turns off
+        // the green LED immediately instead of waiting for firmware timeout (~60 s).
+        ringManager?.stopRealTimeStreaming(type: .realtimeHeartRate)
+
         // Clear activity tag and workout flag so periodic sync resumes normally
         InfluxDBWriter.shared.activeTag = .none
         ringManager?.isWorkoutActive = false
