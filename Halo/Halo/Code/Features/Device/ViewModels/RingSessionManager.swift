@@ -142,6 +142,12 @@ class RingSessionManager: NSObject {
     /// Periodic timer that re-syncs HR log (and other data) at the user's configured HR interval.
     private var periodicSyncTimer: Timer?
 
+    /// When true, the next valid real-time HR reading triggers an InfluxDB write
+    /// and then auto-stops the stream.  Used for periodic spot-checks outside workouts.
+    private var spotCheckActive = false
+    /// Auto-stop the spot-check after this timeout even if no valid reading arrives.
+    private var spotCheckTimeoutTask: Task<Void, Never>?
+
     /// Throttle real-time InfluxDB writes — 15s during workouts, 60s otherwise.
     private var lastInfluxHRWrite: Date = .distantPast
     private var lastInfluxSpO2Write: Date = .distantPast
@@ -703,6 +709,21 @@ extension RingSessionManager: CBPeripheralDelegate {
                         break
                     }
                     realTimeHeartRateBPM = Int(readingValue)
+
+                    // Spot-check: got a valid reading — write to InfluxDB and stop.
+                    if spotCheckActive {
+                        tLog("[SpotCheck] Got HR \(readingValue) — writing to InfluxDB and stopping stream")
+                        spotCheckActive = false
+                        spotCheckTimeoutTask?.cancel()
+                        spotCheckTimeoutTask = nil
+                        lastInfluxHRWrite = now
+                        Task { @MainActor in
+                            InfluxDBWriter.shared.writeHeartRates([(bpm: Int(readingValue), time: now)])
+                        }
+                        stopRealTimeStreaming(type: .realtimeHeartRate)
+                        break
+                    }
+
                     if now.timeIntervalSince(lastInfluxHRWrite) >= currentInfluxWriteInterval {
                         lastInfluxHRWrite = now
                         Task { @MainActor in
@@ -765,8 +786,10 @@ extension RingSessionManager: CBPeripheralDelegate {
             if isWorkoutActive {
                 tLog("[RealTime] Ring auto-stopped stream — restarting for active workout")
                 startRealTimeStreaming(type: .realtimeHeartRate)
+            } else {
+                tLog("[RealTime] Stream stopped — clearing live HR")
+                realTimeHeartRateBPM = nil
             }
-            break
         case RingSessionManager.CMD_SLEEP_DATA:
             handleSleepDataResponse(packet: packet)
         case RingSessionManager.CMD_SYNC_SLEEP_LEGACY:
@@ -1063,6 +1086,11 @@ extension RingSessionManager {
         }
 
         tLog("[PeriodicSync] Syncing HR log, HRV, SpO2, stress, activity…")
+
+        // Fire a brief spot-check: start DataType=6, grab one valid HR reading,
+        // write to InfluxDB, then auto-stop.  Green LED flashes for ~5-10 s.
+        startSpotCheck()
+
         getHeartRateLog { _ in }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             self?.syncHRVData(dayOffset: 0)
@@ -1318,7 +1346,30 @@ extension RingSessionManager {
 
     func stopRealTimeStreaming(type: RealTimeReading) {
         tLog("[RealTime] STOP \(type)")
+        realTimeHeartRateBPM = nil
+        spotCheckActive = false
+        spotCheckTimeoutTask?.cancel()
+        spotCheckTimeoutTask = nil
         sendRealTimeCommand(command: RingSessionManager.CMD_STOP_REAL_TIME, type: type, action: nil)
+    }
+
+    /// Start a brief real-time HR measurement.  The stream auto-stops as soon as
+    /// the first valid (non-zero, ≤220) HR packet arrives, or after 15 s timeout.
+    private func startSpotCheck() {
+        guard !isWorkoutActive else { return }
+        tLog("[SpotCheck] Starting brief HR spot-check")
+        spotCheckActive = true
+        startRealTimeStreaming(type: .realtimeHeartRate)
+
+        // Safety timeout — stop after 15 s even if no valid reading arrives.
+        spotCheckTimeoutTask?.cancel()
+        spotCheckTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard let self, !Task.isCancelled, self.spotCheckActive else { return }
+            tLog("[SpotCheck] Timeout — stopping stream without a valid reading")
+            self.spotCheckActive = false
+            self.stopRealTimeStreaming(type: .realtimeHeartRate)
+        }
     }
     
     private func sendRealTimeCommand(command: UInt8, type: RealTimeReading, action: Action?) {

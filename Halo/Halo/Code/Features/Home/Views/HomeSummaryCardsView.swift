@@ -13,6 +13,8 @@ struct HomeSummaryCardsView: View {
     var sleepDurationMinutes: Int?
     /// Today's average heart rate in bpm (nil if no data).
     var heartRateAverage: Int?
+    /// Live heart rate from real-time stream (nil when not streaming).
+    var currentBPM: Int?
     /// Activity: steps, distance km, calories. Uses PreviewData when real data not yet available.
     var steps: Int
     var distanceKm: Double
@@ -84,9 +86,21 @@ struct HomeSummaryCardsView: View {
             Label(L10n.HomeSummary.heartRate, systemImage: "heart.fill")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
-            if let avg = heartRateAverage {
+            if let bpm = currentBPM, bpm > 0 {
+                Text("\(bpm) \(L10n.HomeSummary.bpm)")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.red)
+                    .contentTransition(.numericText())
+                    .animation(.easeInOut(duration: 0.3), value: bpm)
+                Text("now")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else if let avg = heartRateAverage {
                 Text("\(avg) \(L10n.HomeSummary.bpm)")
                     .font(.title2.weight(.semibold))
+                Text("avg today")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             } else {
                 Text(L10n.HomeSummary.noData)
                     .font(.subheadline)
@@ -117,12 +131,14 @@ extension HomeSummaryCardsView {
     /// Uses PreviewData for activity; pass sleep and HR from SwiftData when available.
     static func withPreviewActivity(
         sleepDurationMinutes: Int? = nil,
-        heartRateAverage: Int? = nil
+        heartRateAverage: Int? = nil,
+        currentBPM: Int? = nil
     ) -> HomeSummaryCardsView {
         let activity = PreviewData.activitySummary
         return HomeSummaryCardsView(
             sleepDurationMinutes: sleepDurationMinutes,
             heartRateAverage: heartRateAverage,
+            currentBPM: currentBPM,
             steps: activity.steps,
             distanceKm: activity.distanceKm,
             calories: activity.calories,
