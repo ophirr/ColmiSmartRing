@@ -9,6 +9,8 @@ import Foundation
 enum SmartRingBLE {
     // MARK: - Device info (scanner)
     static let deviceNamePrefix = "R02_"
+    /// Some rings advertise as "COLMI R02_XXXX" rather than just "R02_XXXX".
+    static let deviceNamePrefixAlt = "COLMI R02"
     static let manufacturerName = "Bluex"
     static let modelNumber = "BX-BLE-5.0"
     static let hardwareRevision = "R02_V3.0"

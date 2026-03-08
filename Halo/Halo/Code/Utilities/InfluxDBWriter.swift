@@ -129,11 +129,8 @@ final class InfluxDBWriter {
 
     /// Load config from UserDefaults and start the flush timer.
     func start() {
-        // Restore saved tag
-        if let savedTag = UserDefaults.standard.string(forKey: "influxdb.activeTag"),
-           let tag = ActivityTag(rawValue: savedTag) {
-            activeTag = tag
-        }
+        // Always start with no activity tag
+        activeTag = .none
         config = InfluxDBConfig.saved
         guard config != nil else {
             debugPrint("[InfluxDB] No config found — cloud sync disabled. Set influxdb.token in UserDefaults.")

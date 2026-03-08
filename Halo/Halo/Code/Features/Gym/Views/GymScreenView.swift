@@ -213,7 +213,6 @@ struct GymScreenView: View {
 
             // Zone time bar
             ZoneTimeBar(zoneTimeSeconds: gymManager.zoneTimeSeconds)
-                .frame(height: 8)
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
 
@@ -347,19 +346,50 @@ private struct ZoneTimeBar: View {
 
     var body: some View {
         let total = zoneTimeSeconds.reduce(0, +)
-        GeometryReader { geo in
-            HStack(spacing: 2) {
-                ForEach(HRZone.allCases, id: \.rawValue) { zone in
-                    let secs = zone.rawValue < zoneTimeSeconds.count ? zoneTimeSeconds[zone.rawValue] : 0
-                    let fraction = total > 0 ? secs / total : 0
-                    if fraction > 0.01 {
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(zone.color)
-                            .frame(width: max(4, geo.size.width * fraction))
+        let zones = HRZone.allCases.filter { $0 != .rest }
+
+        VStack(spacing: 6) {
+            // Proportional bar
+            GeometryReader { geo in
+                HStack(spacing: 1) {
+                    ForEach(zones, id: \.rawValue) { zone in
+                        let secs = zone.rawValue < zoneTimeSeconds.count ? zoneTimeSeconds[zone.rawValue] : 0
+                        let fraction = total > 0 ? secs / total : 0
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(fraction > 0 ? zone.color : zone.color.opacity(0.15))
+                            .frame(width: max(6, geo.size.width * max(fraction, 0.04)))
                     }
                 }
             }
+            .frame(height: 10)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+
+            // Time per zone
+            HStack(spacing: 0) {
+                ForEach(zones, id: \.rawValue) { zone in
+                    let secs = zone.rawValue < zoneTimeSeconds.count ? zoneTimeSeconds[zone.rawValue] : 0
+                    VStack(spacing: 2) {
+                        Circle()
+                            .fill(zone.color)
+                            .frame(width: 6, height: 6)
+                        Text(formatZoneTime(secs))
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(secs > 0 ? Color.secondary : Color.secondary.opacity(0.3))
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
         }
+    }
+
+    private func formatZoneTime(_ seconds: Double) -> String {
+        let total = Int(seconds)
+        let m = total / 60
+        let s = total % 60
+        if m > 0 {
+            return "\(m):\(String(format: "%02d", s))"
+        }
+        return "\(s)s"
     }
 }
 
