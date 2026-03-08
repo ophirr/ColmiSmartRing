@@ -436,6 +436,22 @@ struct ReadingsGraphsView: View {
                 .padding(.vertical, 12)
                 .background(Color(.secondarySystemGroupedBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                // Body Temperature
+                VStack(spacing: 6) {
+                    Label("Body Temp", systemImage: "thermometer.medium")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(ringSessionManager.realTimeTemperatureCelsius.map { String(format: "%.1f °C", $0) } ?? L10n.HomeSummary.noData)
+                        .font(.system(size: 34, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .contentTransition(.numericText())
+                        .animation(.easeInOut(duration: 0.3), value: ringSessionManager.realTimeTemperatureCelsius)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(Color(.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .padding(.vertical, 4)
         } header: {

@@ -133,6 +133,9 @@ class GymSessionManager {
         // Tag all data as exercising during workout
         InfluxDBWriter.shared.activeTag = .exercising
 
+        // Clear stale HR so the warmup indicator shows until the ring locks on fresh data.
+        ringManager?.realTimeHeartRateBPM = nil
+
         // Real-time HR stream is managed by RingSessionManager (started on connect,
         // restarted each periodic sync). Gym just reads realTimeHeartRateBPM.
 
