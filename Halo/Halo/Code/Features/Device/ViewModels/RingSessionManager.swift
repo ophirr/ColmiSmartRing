@@ -1,4 +1,4 @@
-//
+ //
 //  RingSessionManager.swift
 //  Halo
 //
@@ -161,6 +161,8 @@ class RingSessionManager: NSObject {
 
     private static let CMD_START_REAL_TIME: UInt8 = 105
     private static let CMD_STOP_REAL_TIME: UInt8 = 106
+    /// Sport real-time telemetry — ring sends these automatically during exercise.
+    private static let CMD_SPORT_REAL_TIME: UInt8 = 115  // 0x73
     
     
     private static let CMD_BLOOD_OXYGEN: UInt8 = 44
@@ -679,6 +681,8 @@ extension RingSessionManager: CBPeripheralDelegate {
              RingSessionManager.CMD_BLOOD_OXYGEN,
              RingSessionManager.CMD_PRESSURE:
             handleTrackingSettingResponse(packet: packet)
+        case RingSessionManager.CMD_SPORT_REAL_TIME:
+            handleSportRealTimeResponse(packet: packet)
         default:
             // Log unhandled opcodes so we can identify sleep/other response formats
             debugPrint("Unhandled response opcode: \(packet[0]) (0x\(String(format: "%02x", packet[0]))) – full packet: \(packet)")
@@ -1073,6 +1077,51 @@ extension RingSessionManager {
         
         let data = Data(packet)
         peripheral.writeValue(data, for: uartRxCharacteristic, type: .withResponse)
+    }
+}
+
+// MARK: - Sport Real-Time Telemetry (0x73)
+
+extension RingSessionManager {
+    /// Handle sport real-time packets (command 115 / 0x73).
+    /// These arrive automatically during exercise and contain HR + SpO2.
+    /// Packet layout (observed):
+    ///   [0] = 115 (command)
+    ///   [1] = 18  (sub-type / flags — constant so far)
+    ///   [2..3] = 0 (reserved)
+    ///   [4] = heart rate BPM
+    ///   [5] = 0
+    ///   [6..7] = PPG signal (little-endian uint16, raw sensor)
+    ///   [8..9] = 0
+    ///   [10] = SpO2 percentage (or secondary HR — tracks ~packet[4] minus 10-13)
+    ///   [11..14] = 0
+    ///   [15] = checksum
+    func handleSportRealTimeResponse(packet: [UInt8]) {
+        guard packet.count >= 11 else { return }
+        let hr = Int(packet[4])
+        let spo2 = Int(packet[10])
+
+        if hr > 0 {
+            realTimeHeartRateBPM = hr
+            let now = Date()
+            if now.timeIntervalSince(lastInfluxHRWrite) >= influxWriteInterval {
+                lastInfluxHRWrite = now
+                Task { @MainActor in
+                    InfluxDBWriter.shared.writeHeartRates([(bpm: hr, time: now)])
+                }
+            }
+        }
+
+        if spo2 > 0, spo2 <= 100 {
+            realTimeBloodOxygenPercent = spo2
+            let now = Date()
+            if now.timeIntervalSince(lastInfluxSpO2Write) >= influxWriteInterval {
+                lastInfluxSpO2Write = now
+                Task { @MainActor in
+                    InfluxDBWriter.shared.writeSpO2(value: Double(spo2), time: now)
+                }
+            }
+        }
     }
 }
 
