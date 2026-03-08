@@ -207,6 +207,11 @@ final class InfluxDBWriter {
         write("spo2,source=colmi_r02\(tag) percent=\(value) \(epochSeconds(time))")
     }
 
+    func writeTemperature(celsius: Double, time: Date) {
+        let rounded = (celsius * 10).rounded() / 10  // one decimal place
+        write("body_temp,source=colmi_r02\(tag) celsius=\(rounded) \(epochSeconds(time))")
+    }
+
     func writeActivity(steps: Int, calories: Int, distanceKm: Double, time: Date) {
         write("activity,source=colmi_r02\(tag) steps=\(steps)i,calories=\(calories)i,distance_km=\(distanceKm) \(epochSeconds(time))")
     }

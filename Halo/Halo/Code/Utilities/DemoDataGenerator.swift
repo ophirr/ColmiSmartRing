@@ -33,6 +33,7 @@ final class DemoDataGenerator {
     private var baseHRV: Double = 45
     private var baseSpO2: Double = 97.5
     private var baseStress: Double = 35
+    private var baseTemp: Double = 36.5
     private var demoBatteryLevel: Int = 78
 
     private(set) var isRunning = false
@@ -82,6 +83,7 @@ final class DemoDataGenerator {
         ringSessionManager?.currentBatteryInfo = nil
         ringSessionManager?.realTimeHeartRateBPM = nil
         ringSessionManager?.realTimeBloodOxygenPercent = nil
+        ringSessionManager?.realTimeTemperatureCelsius = nil
 
         debugPrint("[Demo] Stopped — \(samplesGenerated) samples generated")
     }
@@ -123,9 +125,16 @@ final class DemoDataGenerator {
         let stressFromHR = max(0, (hr - 65) * 0.5)
         let stress = clamp((baseStress + stressFromHR) / 2.0 + tagModifier.stressOffset + jitter(3), min: 1, max: 100)
 
-        // Feed real-time HR and SpO2 for gym mode and metrics real-time cards
+        // Body temperature: slight circadian variation (~0.5°C), rises with activity
+        baseTemp = drift(baseTemp, min: 35.5, max: 37.5, step: 0.05)
+        let tempCircadian = circadian * 0.3 - 0.15    // cooler at night, warmer daytime
+        let tempActivity = tagModifier.hrOffset > 0 ? tagModifier.hrOffset * 0.01 : 0
+        let temp = clamp(baseTemp + tempCircadian + tempActivity + jitter(0.05), min: 35.0, max: 38.0)
+
+        // Feed real-time HR, SpO2, and temperature for real-time cards
         ringSessionManager?.realTimeHeartRateBPM = bpm
         ringSessionManager?.realTimeBloodOxygenPercent = Int(round(spo2))
+        ringSessionManager?.realTimeTemperatureCelsius = round(temp * 10) / 10
 
         // --- Write to InfluxDB (respecting toggles) ---
         if hrEnabled {
@@ -140,6 +149,7 @@ final class DemoDataGenerator {
         if stressEnabled {
             influx.writeStress(value: round(stress * 10) / 10, time: now)
         }
+        influx.writeTemperature(celsius: round(temp * 10) / 10, time: now)
 
         // --- Write to SwiftData (for local charts, respecting toggles) ---
         if let ctx = modelContext {

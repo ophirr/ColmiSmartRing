@@ -61,6 +61,8 @@ class RingSessionManager: NSObject {
     var realTimeHeartRateBPM: Int?
     /// Latest real-time blood oxygen reading in percent.
     var realTimeBloodOxygenPercent: Int?
+    /// Latest real-time body temperature in °C (e.g. 36.3).
+    var realTimeTemperatureCelsius: Double?
     /// Latest battery info reported by the ring.
     var currentBatteryInfo: BatteryInfo?
     /// True when we have a saved ring but no peripheral and are scanning for it.
@@ -116,9 +118,15 @@ class RingSessionManager: NSObject {
     /// Periodic timer that re-syncs HR log (and other data) at the user's configured HR interval.
     private var periodicSyncTimer: Timer?
 
+    /// Timer that sends "continue" commands to keep the real-time HR stream alive.
+    /// The ring auto-stops streaming after a few seconds without a continue.
+    private static let realTimeContinueInterval: TimeInterval = 4.0
+    private var realTimeContinueTimer: Timer?
+
     /// Throttle real-time InfluxDB writes to once per minute.
     private var lastInfluxHRWrite: Date = .distantPast
     private var lastInfluxSpO2Write: Date = .distantPast
+    private var lastInfluxTempWrite: Date = .distantPast
     private let influxWriteInterval: TimeInterval = 60
 
     private var uartRxCharacteristic: CBCharacteristic?
@@ -515,6 +523,8 @@ extension RingSessionManager: CBCentralManagerDelegate {
         peripheralConnected = false
         realTimeHeartRateBPM = nil
         realTimeBloodOxygenPercent = nil
+        realTimeTemperatureCelsius = nil
+        stopRealTimeContinueTimer()
         characteristicsDiscovered = false
         uartRxCharacteristic = nil
         uartTxCharacteristic = nil
@@ -633,39 +643,58 @@ extension RingSessionManager: CBPeripheralDelegate {
                 debugPrint("Real-time response packet too short: \(packet)")
                 break
             }
-            let readingType = RealTimeReading(rawValue: packet[1]) ?? .heartRate
+            guard let readingType = RealTimeReading(rawValue: packet[1]) else {
+                debugPrint("Real-Time Reading - Unknown sub-type: \(packet[1]) – full packet: \(packet)")
+                break
+            }
             let errorCode = packet[2]
 
             if errorCode == 0 {
                 let readingValue = packet[3]
-                // Ignore zero readings (sensor warmup / no contact)
-                if readingValue > 0 {
-                    let now = Date()
-                    switch readingType {
-                    case .heartRate:
-                        realTimeHeartRateBPM = Int(readingValue)
-                        if now.timeIntervalSince(lastInfluxHRWrite) >= influxWriteInterval {
-                            lastInfluxHRWrite = now
-                            Task { @MainActor in
-                                InfluxDBWriter.shared.writeHeartRates([(bpm: Int(readingValue), time: now)])
-                            }
+                let now = Date()
+
+                switch readingType {
+                case .heartRate:
+                    // Ignore zero readings (sensor warmup / no contact)
+                    guard readingValue > 0 else { break }
+                    realTimeHeartRateBPM = Int(readingValue)
+                    if now.timeIntervalSince(lastInfluxHRWrite) >= influxWriteInterval {
+                        lastInfluxHRWrite = now
+                        Task { @MainActor in
+                            InfluxDBWriter.shared.writeHeartRates([(bpm: Int(readingValue), time: now)])
                         }
-                    case .spo2:
-                        realTimeBloodOxygenPercent = Int(readingValue)
-                        if now.timeIntervalSince(lastInfluxSpO2Write) >= influxWriteInterval {
-                            lastInfluxSpO2Write = now
-                            Task { @MainActor in
-                                InfluxDBWriter.shared.writeSpO2(value: Double(readingValue), time: now)
-                            }
-                        }
-                    default:
-                        break
                     }
+                case .spo2:
+                    guard readingValue > 0 else { break }
+                    realTimeBloodOxygenPercent = Int(readingValue)
+                    if now.timeIntervalSince(lastInfluxSpO2Write) >= influxWriteInterval {
+                        lastInfluxSpO2Write = now
+                        Task { @MainActor in
+                            InfluxDBWriter.shared.writeSpO2(value: Double(readingValue), time: now)
+                        }
+                    }
+                case .temperature:
+                    // Ring sends raw byte = (temp_celsius * 10) - 200
+                    // e.g. raw 163 → (163 + 200) / 10.0 = 36.3 °C
+                    guard readingValue > 0 else { break }
+                    let celsius = (Double(readingValue) + 200.0) / 10.0
+                    realTimeTemperatureCelsius = celsius
+                    if now.timeIntervalSince(lastInfluxTempWrite) >= influxWriteInterval {
+                        lastInfluxTempWrite = now
+                        Task { @MainActor in
+                            InfluxDBWriter.shared.writeTemperature(celsius: celsius, time: now)
+                        }
+                    }
+                default:
+                    break
                 }
                 debugPrint("Real-Time Reading - Type: \(readingType), Value: \(readingValue)")
             } else {
                 debugPrint("Error in reading - Type: \(readingType), Error Code: \(errorCode)")
             }
+        case RingSessionManager.CMD_STOP_REAL_TIME:
+            // Acknowledgement that real-time streaming was stopped — no action needed
+            break
         case RingSessionManager.CMD_SLEEP_DATA:
             handleSleepDataResponse(packet: packet)
         case RingSessionManager.CMD_SYNC_SLEEP_LEGACY:
@@ -1133,14 +1162,32 @@ extension RingSessionManager {
     
     func startRealTimeStreaming(type: RealTimeReading) {
         sendRealTimeCommand(command: RingSessionManager.CMD_START_REAL_TIME, type: type, action: .start)
+        startRealTimeContinueTimer(type: type)
     }
-    
+
     func continueRealTimeStreaming(type: RealTimeReading) {
         sendRealTimeCommand(command: RingSessionManager.CMD_START_REAL_TIME, type: type, action: .continue)
     }
-    
+
     func stopRealTimeStreaming(type: RealTimeReading) {
+        stopRealTimeContinueTimer()
         sendRealTimeCommand(command: RingSessionManager.CMD_STOP_REAL_TIME, type: type, action: nil)
+    }
+
+    /// Periodically send "continue" so the ring doesn't auto-stop the real-time stream.
+    private func startRealTimeContinueTimer(type: RealTimeReading) {
+        stopRealTimeContinueTimer()
+        realTimeContinueTimer = Timer.scheduledTimer(withTimeInterval: Self.realTimeContinueInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.peripheralConnected else { return }
+                self.continueRealTimeStreaming(type: type)
+            }
+        }
+    }
+
+    private func stopRealTimeContinueTimer() {
+        realTimeContinueTimer?.invalidate()
+        realTimeContinueTimer = nil
     }
     
     private func sendRealTimeCommand(command: UInt8, type: RealTimeReading, action: Action?) {

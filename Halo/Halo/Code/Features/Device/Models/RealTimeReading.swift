@@ -17,6 +17,7 @@ enum RealTimeReading: UInt8 {
     case pressure = 8
     case bloodSugar = 9
     case hrv = 10
+    case temperature = 11
 }
 
 enum Action: UInt8 {
