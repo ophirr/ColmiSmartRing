@@ -113,6 +113,14 @@ class RingSessionManager: NSObject {
     private static let keepaliveInterval: TimeInterval = 45
     private var keepaliveWorkItem: DispatchWorkItem?
 
+    /// Periodic timer that re-syncs HR log (and other data) at the user's configured HR interval.
+    private var periodicSyncTimer: Timer?
+
+    /// Throttle real-time InfluxDB writes to once per minute.
+    private var lastInfluxHRWrite: Date = .distantPast
+    private var lastInfluxSpO2Write: Date = .distantPast
+    private let influxWriteInterval: TimeInterval = 60
+
     private var uartRxCharacteristic: CBCharacteristic?
     private var uartTxCharacteristic: CBCharacteristic?
     private var colmiWriteCharacteristic: CBCharacteristic?
@@ -202,6 +210,7 @@ class RingSessionManager: NSObject {
     private var pendingTrackingSetting: RingTrackingSetting?
     private var pendingTrackingSettingCallback: ((Bool) -> Void)?
     private var pendingTrackingSettingContinuation: CheckedContinuation<Bool, Error>?
+    private var trackingSettingGeneration: UInt = 0
     /// Last requested dayOffset for sleep (0 = today); used when parsing response 68.
     private var lastSleepDayOffset: Int = 0
     /// Big Data notify buffer (variable-length responses may arrive in chunks).
@@ -510,6 +519,7 @@ extension RingSessionManager: CBCentralManagerDelegate {
         colmiWriteCharacteristic = nil
         colmiNotifyCharacteristic = nil
         stopKeepalive()
+        stopPeriodicSync()
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: (any Error)?) {
@@ -623,16 +633,32 @@ extension RingSessionManager: CBPeripheralDelegate {
             }
             let readingType = RealTimeReading(rawValue: packet[1]) ?? .heartRate
             let errorCode = packet[2]
-            
+
             if errorCode == 0 {
                 let readingValue = packet[3]
-                switch readingType {
-                case .heartRate:
-                    realTimeHeartRateBPM = Int(readingValue)
-                case .spo2:
-                    realTimeBloodOxygenPercent = Int(readingValue)
-                default:
-                    break
+                // Ignore zero readings (sensor warmup / no contact)
+                if readingValue > 0 {
+                    let now = Date()
+                    switch readingType {
+                    case .heartRate:
+                        realTimeHeartRateBPM = Int(readingValue)
+                        if now.timeIntervalSince(lastInfluxHRWrite) >= influxWriteInterval {
+                            lastInfluxHRWrite = now
+                            Task { @MainActor in
+                                InfluxDBWriter.shared.writeHeartRates([(bpm: Int(readingValue), time: now)])
+                            }
+                        }
+                    case .spo2:
+                        realTimeBloodOxygenPercent = Int(readingValue)
+                        if now.timeIntervalSince(lastInfluxSpO2Write) >= influxWriteInterval {
+                            lastInfluxSpO2Write = now
+                            Task { @MainActor in
+                                InfluxDBWriter.shared.writeSpO2(value: Double(readingValue), time: now)
+                            }
+                        }
+                    default:
+                        break
+                    }
                 }
                 debugPrint("Real-Time Reading - Type: \(readingType), Value: \(readingValue)")
             } else {
@@ -832,10 +858,75 @@ extension RingSessionManager {
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) { [weak self] in
             guard let self else { return }
             Task { @MainActor in
-                if let settings = try? await self.readHRLogSettings() {
-                    debugPrint("[SyncOnConnect] HR log settings: enabled=\(settings.enabled), interval=\(settings.intervalMinutes)min")
-                }
+                await self.ensureHRLogSettings()
             }
+        }
+    }
+
+    /// Read HR log settings from ring; if disabled or interval doesn't match the user's saved
+    /// preference, write the preferred settings. This ensures HR logging survives ring reboots.
+    /// After configuring, starts a periodic sync timer at the same interval.
+    private func ensureHRLogSettings() async {
+        let savedInterval = UserDefaults.standard.object(forKey: "hrLogInterval") as? Int ?? 5
+        let ringSettings = try? await readHRLogSettings()
+        debugPrint("[SyncOnConnect] HR log settings: enabled=\(ringSettings?.enabled ?? false), interval=\(ringSettings?.intervalMinutes ?? 0)min")
+
+        let needsWrite = ringSettings == nil
+            || !ringSettings!.enabled
+            || ringSettings!.intervalMinutes != savedInterval
+
+        if needsWrite {
+            debugPrint("[SyncOnConnect] Writing HR log settings: enabled=true, interval=\(savedInterval)min")
+            do {
+                try await writeTrackingSetting(.heartRate, enabled: true)
+                try await writeHRLogSettings(enabled: true, intervalMinutes: savedInterval)
+                debugPrint("[SyncOnConnect] HR log settings written successfully")
+            } catch {
+                debugPrint("[SyncOnConnect] Failed to write HR log settings: \(error)")
+            }
+        }
+
+        startPeriodicSync(intervalMinutes: savedInterval)
+
+        // Start continuous real-time HR streaming so we get per-minute data points
+        debugPrint("[SyncOnConnect] Starting real-time HR stream")
+        startRealTimeStreaming(type: .heartRate)
+    }
+
+    /// Start a repeating timer that re-fetches HR log (and other metrics) from the ring.
+    private func startPeriodicSync(intervalMinutes: Int) {
+        stopPeriodicSync()
+        let interval = TimeInterval(max(intervalMinutes, 1) * 60)
+        debugPrint("[PeriodicSync] Starting periodic sync every \(intervalMinutes) min")
+        periodicSyncTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.runPeriodicSync()
+            }
+        }
+    }
+
+    private func stopPeriodicSync() {
+        periodicSyncTimer?.invalidate()
+        periodicSyncTimer = nil
+    }
+
+    private func runPeriodicSync() {
+        guard peripheralConnected, characteristicsDiscovered else { return }
+        debugPrint("[PeriodicSync] Syncing HR log, HRV, SpO2, stress, activity…")
+        // Keep the real-time HR stream alive
+        continueRealTimeStreaming(type: .heartRate)
+        getHeartRateLog { _ in }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.syncHRVData(dayOffset: 0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            self?.syncBloodOxygen(dayOffset: 0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+            self?.syncPressureData(dayOffset: 0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
+            self?.syncActivityData(dayOffset: 0)
         }
     }
 }
@@ -1071,6 +1162,7 @@ private let settingsActionWrite: UInt8 = 2
 
 enum RingSessionTrackingError: Error {
     case notConnected
+    case timeout
 }
 
 extension RingSessionManager {
@@ -1081,29 +1173,49 @@ extension RingSessionManager {
         sendSettingRead(commandId: setting.commandId)
     }
 
-    /// Read one tracking setting from the ring (async); throws if not connected or send fails.
+    /// Read one tracking setting from the ring (async); throws if not connected or times out after 5 s.
     func readTrackingSetting(_ setting: RingTrackingSetting) async throws -> Bool {
         try await withCheckedThrowingContinuation { continuation in
             guard uartRxCharacteristic != nil, peripheral != nil else {
                 continuation.resume(throwing: RingSessionTrackingError.notConnected)
                 return
             }
+            trackingSettingGeneration &+= 1
+            let gen = trackingSettingGeneration
             pendingTrackingSetting = setting
             pendingTrackingSettingContinuation = continuation
             sendSettingRead(commandId: setting.commandId)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                guard let self, self.trackingSettingGeneration == gen, self.pendingTrackingSettingContinuation != nil else { return }
+                debugPrint("[TrackingSetting] Timeout waiting for \(setting.displayName) read response")
+                self.pendingTrackingSettingContinuation = nil
+                self.pendingTrackingSetting = nil
+                continuation.resume(throwing: RingSessionTrackingError.timeout)
+            }
         }
     }
 
-    /// Write one tracking setting to the ring (async); throws if not connected or send fails.
+    /// Write one tracking setting to the ring (async); throws if not connected or times out after 5 s.
     func writeTrackingSetting(_ setting: RingTrackingSetting, enabled: Bool) async throws {
-        _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
             guard uartRxCharacteristic != nil, peripheral != nil else {
                 continuation.resume(throwing: RingSessionTrackingError.notConnected)
                 return
             }
+            trackingSettingGeneration &+= 1
+            let gen = trackingSettingGeneration
             pendingTrackingSetting = setting
             pendingTrackingSettingContinuation = continuation
             sendSettingWrite(commandId: setting.commandId, isEnabled: enabled)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                guard let self, self.trackingSettingGeneration == gen, self.pendingTrackingSettingContinuation != nil else { return }
+                debugPrint("[TrackingSetting] Timeout waiting for \(setting.displayName) write response — assuming success")
+                self.pendingTrackingSettingContinuation = nil
+                self.pendingTrackingSetting = nil
+                continuation.resume(returning: enabled)
+            }
         }
     }
 
