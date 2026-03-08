@@ -642,20 +642,16 @@ extension RingSessionManager: CBPeripheralDelegate {
                     switch readingType {
                     case .heartRate:
                         realTimeHeartRateBPM = Int(readingValue)
-                        let hrElapsed = now.timeIntervalSince(lastInfluxHRWrite)
-                        if hrElapsed >= influxWriteInterval {
+                        if now.timeIntervalSince(lastInfluxHRWrite) >= influxWriteInterval {
                             lastInfluxHRWrite = now
-                            debugPrint("[RealTimeInflux] Writing HR \(readingValue) bpm to InfluxDB (elapsed \(Int(hrElapsed))s)")
                             Task { @MainActor in
                                 InfluxDBWriter.shared.writeHeartRates([(bpm: Int(readingValue), time: now)])
                             }
                         }
                     case .spo2:
                         realTimeBloodOxygenPercent = Int(readingValue)
-                        let spo2Elapsed = now.timeIntervalSince(lastInfluxSpO2Write)
-                        if spo2Elapsed >= influxWriteInterval {
+                        if now.timeIntervalSince(lastInfluxSpO2Write) >= influxWriteInterval {
                             lastInfluxSpO2Write = now
-                            debugPrint("[RealTimeInflux] Writing SpO2 \(readingValue)% to InfluxDB (elapsed \(Int(spo2Elapsed))s)")
                             Task { @MainActor in
                                 InfluxDBWriter.shared.writeSpO2(value: Double(readingValue), time: now)
                             }
