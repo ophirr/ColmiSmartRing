@@ -177,26 +177,40 @@ struct GymScreenView: View {
 
             Spacer()
 
-            // Big HR number
-            VStack(spacing: 4) {
-                Text("\(gymManager.currentBPM)")
-                    .font(.system(size: 120, weight: .bold, design: .rounded))
-                    .foregroundStyle(.primary)
+            // Big HR number or warmup indicator
+            if gymManager.currentBPM > 0 {
+                VStack(spacing: 4) {
+                    Text("\(gymManager.currentBPM)")
+                        .font(.system(size: 120, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
 
-                Text("BPM")
-                    .font(.title3.weight(.medium))
-                    .foregroundStyle(.primary.opacity(0.6))
+                    Text("BPM")
+                        .font(.title3.weight(.medium))
+                        .foregroundStyle(.primary.opacity(0.6))
+                }
+
+                // Zone label
+                Text(gymManager.currentZone.colorLabel.uppercased())
+                    .font(.system(size: 24, weight: .heavy))
+                    .foregroundStyle(gymManager.currentZone.color)
+                    .padding(.top, 4)
+
+                Text(gymManager.currentZone.subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.primary.opacity(0.5))
+            } else {
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                        .tint(.primary.opacity(0.6))
+                    Text("Warming up sensor...")
+                        .font(.title3.weight(.medium))
+                        .foregroundStyle(.primary.opacity(0.6))
+                    Text("Keep the ring snug on your finger")
+                        .font(.subheadline)
+                        .foregroundStyle(.primary.opacity(0.4))
+                }
             }
-
-            // Zone label
-            Text(gymManager.currentZone.colorLabel.uppercased())
-                .font(.system(size: 24, weight: .heavy))
-                .foregroundStyle(gymManager.currentZone.color)
-                .padding(.top, 4)
-
-            Text(gymManager.currentZone.subtitle)
-                .font(.subheadline)
-                .foregroundStyle(.primary.opacity(0.5))
 
             Spacer()
 
