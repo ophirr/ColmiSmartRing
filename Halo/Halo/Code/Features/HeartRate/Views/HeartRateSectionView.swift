@@ -25,7 +25,7 @@ struct HeartRateSectionView: View {
                             let heartRatesWithTimes = try hrl.heartRatesWithTimes()
                             data = heartRatesWithTimes.map { HeartRateDataPoint(heartRate: $0.0, time: $0.1) }
                         } catch {
-                            debugPrint("Error loading data: \(error)")
+                            tLog("Error loading data: \(error)")
                         }
                     }
                 }
@@ -46,7 +46,7 @@ struct HeartRateSectionView: View {
 
         Section(L10n.HeartRate.sectionTitle) {
             Button {
-                ringSessionManager.startRealTimeStreaming(type: .heartRate)
+                ringSessionManager.startRealTimeStreaming(type: .realtimeHeartRate)
             } label: {
                 Text(L10n.HeartRate.streamingStart)
                     .frame(maxWidth: .infinity)
@@ -95,7 +95,7 @@ struct HeartRateSectionView: View {
             let heartRatesWithTimes = try log.toHeartRateLog().heartRatesWithTimes()
             data = heartRatesWithTimes.map { HeartRateDataPoint(heartRate: $0.0, time: $0.1) }
         } catch {
-            debugPrint("Error loading stored heart rate: \(error)")
+            tLog("Error loading stored heart rate: \(error)")
         }
     }
 
@@ -125,19 +125,19 @@ struct HeartRateSectionView: View {
             }
             .joined(separator: ", ")
 
-        debugPrint("========= SWIFTDATA SAVE: Heart Rate Log =========")
-        debugPrint("action: \(action)")
-        debugPrint("dayStart: \(swiftDataLogDate(dayStart))")
-        debugPrint("timestamp: \(swiftDataLogDate(log.timestamp))")
-        debugPrint("size: \(log.size), index: \(log.index), range: \(log.range)")
-        debugPrint("nonZeroHeartRates: [\(nonZeroEntries)]")
+        tLog("========= SWIFTDATA SAVE: Heart Rate Log =========")
+        tLog("action: \(action)")
+        tLog("dayStart: \(swiftDataLogDate(dayStart))")
+        tLog("timestamp: \(swiftDataLogDate(log.timestamp))")
+        tLog("size: \(log.size), index: \(log.index), range: \(log.range)")
+        tLog("nonZeroHeartRates: [\(nonZeroEntries)]")
         do {
             try modelContext.save()
-            debugPrint("result: SUCCESS")
+            tLog("result: SUCCESS")
         } catch {
-            debugPrint("result: FAILED - \(error)")
+            tLog("result: FAILED - \(error)")
         }
-        debugPrint("==================================================")
+        tLog("==================================================")
     }
 
     private func swiftDataLogDate(_ date: Date) -> String {

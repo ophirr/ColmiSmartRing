@@ -13,6 +13,10 @@ enum RealTimeReading: UInt8 {
     case spo2 = 3
     case fatigue = 4
     case healthCheck = 5
+    /// Continuous real-time HR — responses arrive on command 30 (0x1E)
+    /// instead of command 105 (0x69).  May provide longer/continuous
+    /// PPG measurement compared to heartRate (DataType 1).
+    case realtimeHeartRate = 6
     case ecg = 7
     case pressure = 8
     case bloodSugar = 9

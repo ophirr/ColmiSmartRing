@@ -133,18 +133,22 @@ class RingSessionManager: NSObject {
     private static let scanTimeout: TimeInterval = 15
     private var scanWorkItem: DispatchWorkItem?
 
-    /// Interval between keepalive packets to avoid BLE idle disconnect (e.g. 45–60 s).
-    private static let keepaliveInterval: TimeInterval = 45
+    /// Interval between keepalive battery reads.  The periodic sync timer and
+    /// real-time HR stream already keep the BLE connection alive, so this only
+    /// needs to cover long idle gaps.  5 minutes is plenty.
+    private static let keepaliveInterval: TimeInterval = 300
     private var keepaliveWorkItem: DispatchWorkItem?
 
     /// Periodic timer that re-syncs HR log (and other data) at the user's configured HR interval.
     private var periodicSyncTimer: Timer?
 
-    /// Throttle real-time InfluxDB writes to once per minute.
+    /// Throttle real-time InfluxDB writes — 15s during workouts, 60s otherwise.
     private var lastInfluxHRWrite: Date = .distantPast
     private var lastInfluxSpO2Write: Date = .distantPast
     private var lastInfluxTempWrite: Date = .distantPast
-    private let influxWriteInterval: TimeInterval = 60
+    private var currentInfluxWriteInterval: TimeInterval {
+        isWorkoutActive ? 15 : 60
+    }
 
     private var uartRxCharacteristic: CBCharacteristic?
     private var uartTxCharacteristic: CBCharacteristic?
@@ -188,6 +192,10 @@ class RingSessionManager: NSObject {
     private static let CMD_STOP_REAL_TIME: UInt8 = 106
     /// Sport real-time telemetry — ring sends these automatically during exercise.
     private static let CMD_SPORT_REAL_TIME: UInt8 = 115  // 0x73
+    /// Realtime heart rate response (0x1E).  Sent by the ring when
+    /// DataType=6 (realtimeHeartRate) is requested via CMD_START_REAL_TIME.
+    /// Packet: [30, heartRate, 0, ..., checksum]
+    private static let CMD_REAL_TIME_HEART_RATE: UInt8 = 30
     
     
     private static let CMD_BLOOD_OXYGEN: UInt8 = 44
@@ -285,7 +293,7 @@ class RingSessionManager: NSObject {
         if manager.state == .poweredOn {
             actuallyStartScan()
         } else {
-            debugPrint("[Discovery] Waiting for BLE (state=\(manager.state.rawValue))")
+            tLog("[Discovery] Waiting for BLE (state=\(manager.state.rawValue))")
         }
     }
 
@@ -323,13 +331,13 @@ class RingSessionManager: NSObject {
 
     /// Connect to a discovered peripheral and save it as the ring (persist identifier).
     func connectAndSaveRing(peripheral p: CBPeripheral) {
-        debugPrint("[Connect] connectAndSaveRing called – manager.state=\(manager.state.rawValue), peripheral.state=\(p.state.rawValue)")
+        tLog("[Connect] connectAndSaveRing called – manager.state=\(manager.state.rawValue), peripheral.state=\(p.state.rawValue)")
         guard manager.state == .poweredOn else {
-            debugPrint("[Connect] ⚠️ Manager not powered on, aborting")
+            tLog("[Connect] ⚠️ Manager not powered on, aborting")
             return
         }
         if p.state == .connected || p.state == .connecting {
-            debugPrint("[Connect] ⚠️ Already connected/connecting, skipping")
+            tLog("[Connect] ⚠️ Already connected/connecting, skipping")
             return
         }
         stopDiscovery()
@@ -339,7 +347,7 @@ class RingSessionManager: NSObject {
             CBConnectPeripheralOptionNotifyOnConnectionKey: true,
             CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
         ])
-        debugPrint("[Connect] Connection request sent")
+        tLog("[Connect] Connection request sent")
     }
 
     func removeRing() {
@@ -463,19 +471,19 @@ class RingSessionManager: NSObject {
 // MARK: - CBCentralManagerDelegate
 extension RingSessionManager: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        debugPrint("Central manager state: \(central.state)")
+        tLog("Central manager state: \(central.state)")
         switch central.state {
         case .poweredOn:
             if isDiscovering {
                 actuallyStartScan()
             } else if let id = savedRingIdentifier {
                 if let known = central.retrievePeripherals(withIdentifiers: [id]).first {
-                    debugPrint("Found previously connected peripheral")
+                    tLog("Found previously connected peripheral")
                     peripheral = known
                     peripheral?.delegate = self
                     connect()
                 } else {
-                    debugPrint("Known peripheral not found, starting scan")
+                    tLog("Known peripheral not found, starting scan")
                     startScanningForRing()
                 }
             }
@@ -524,9 +532,9 @@ extension RingSessionManager: CBCentralManagerDelegate {
             savedRingIdentifier = peripheral.identifier
             ringDisplayName = peripheral.name ?? "COLMI R02 Ring"
         }
-        debugPrint("DEBUG: Connected to peripheral: \(peripheral)")
+        tLog("DEBUG: Connected to peripheral: \(peripheral)")
         peripheral.delegate = self
-        debugPrint("DEBUG: Discovering services...")
+        tLog("DEBUG: Discovering services...")
         peripheral.discoverServices([
             CBUUID(string: Self.ringServiceUUID),
             CBUUID(string: Self.deviceInfoServiceUUID),
@@ -536,7 +544,7 @@ extension RingSessionManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: (any Error)?) {
-        debugPrint("Disconnected from peripheral: \(peripheral), error: \(error.debugDescription)")
+        tLog("Disconnected from peripheral: \(peripheral), error: \(error.debugDescription)")
         peripheralConnected = false
         realTimeHeartRateBPM = nil
         lastRealTimeHRPacketTime = nil
@@ -555,32 +563,32 @@ extension RingSessionManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: (any Error)?) {
-        debugPrint("Failed to connect to peripheral: \(peripheral), error: \(error.debugDescription)")
+        tLog("Failed to connect to peripheral: \(peripheral), error: \(error.debugDescription)")
     }
 }
 
 // MARK: - CBPeripheralDelegate
 extension RingSessionManager: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: (any Error)?) {
-        debugPrint("DEBUG: Services discovery callback, error: \(String(describing: error))")
+        tLog("DEBUG: Services discovery callback, error: \(String(describing: error))")
         guard error == nil, let services = peripheral.services else {
-            debugPrint("DEBUG: No services found or error occurred")
+            tLog("DEBUG: No services found or error occurred")
             return
         }
         
-        debugPrint("DEBUG: Found \(services.count) services")
+        tLog("DEBUG: Found \(services.count) services")
         for service in services {
             switch service.uuid {
             case CBUUID(string: Self.ringServiceUUID):
-                debugPrint("DEBUG: Found ring service, discovering characteristics...")
+                tLog("DEBUG: Found ring service, discovering characteristics...")
                 peripheral.discoverCharacteristics([
                     CBUUID(string: Self.uartRxCharacteristicUUID),
                     CBUUID(string: Self.uartTxCharacteristicUUID)
                 ], for: service)
             case CBUUID(string: Self.deviceInfoServiceUUID):
-                debugPrint("DEBUG: Found device info service")
+                tLog("DEBUG: Found device info service")
             case CBUUID(string: Self.colmiServiceUUID):
-                debugPrint("DEBUG: Found Colmi Big Data service, discovering characteristics...")
+                tLog("DEBUG: Found Colmi Big Data service, discovering characteristics...")
                 peripheral.discoverCharacteristics([
                     CBUUID(string: Self.colmiWriteUUID),
                     CBUUID(string: Self.colmiNotifyUUID)
@@ -592,31 +600,31 @@ extension RingSessionManager: CBPeripheralDelegate {
     }
     
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        debugPrint("DEBUG: Characteristics discovery callback, error: \(String(describing: error))")
+        tLog("DEBUG: Characteristics discovery callback, error: \(String(describing: error))")
         guard error == nil, let characteristics = service.characteristics else {
-            debugPrint("DEBUG: No characteristics found or error occurred")
+            tLog("DEBUG: No characteristics found or error occurred")
             return
         }
         
-        debugPrint("DEBUG: Found \(characteristics.count) characteristics")
+        tLog("DEBUG: Found \(characteristics.count) characteristics")
         for characteristic in characteristics {
             switch characteristic.uuid {
             case CBUUID(string: Self.uartRxCharacteristicUUID):
-                debugPrint("DEBUG: Found UART RX characteristic")
+                tLog("DEBUG: Found UART RX characteristic")
                 self.uartRxCharacteristic = characteristic
             case CBUUID(string: Self.uartTxCharacteristicUUID):
-                debugPrint("DEBUG: Found UART TX characteristic")
+                tLog("DEBUG: Found UART TX characteristic")
                 self.uartTxCharacteristic = characteristic
                 peripheral.setNotifyValue(true, for: characteristic)
             case CBUUID(string: Self.colmiWriteUUID):
-                debugPrint("DEBUG: Found Colmi Big Data write characteristic")
+                tLog("DEBUG: Found Colmi Big Data write characteristic")
                 self.colmiWriteCharacteristic = characteristic
             case CBUUID(string: Self.colmiNotifyUUID):
-                debugPrint("DEBUG: Found Colmi Big Data notify characteristic")
+                tLog("DEBUG: Found Colmi Big Data notify characteristic")
                 self.colmiNotifyCharacteristic = characteristic
                 peripheral.setNotifyValue(true, for: characteristic)
             default:
-                debugPrint("DEBUG: Found other characteristic: \(characteristic.uuid)")
+                tLog("DEBUG: Found other characteristic: \(characteristic.uuid)")
             }
         }
         let wasReady = characteristicsDiscovered
@@ -632,7 +640,7 @@ extension RingSessionManager: CBPeripheralDelegate {
     
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard let value = characteristic.value else {
-            debugPrint("Failed to read characteristic value: \(String(describing: error))")
+            tLog("Failed to read characteristic value: \(String(describing: error))")
             return
         }
         
@@ -641,7 +649,7 @@ extension RingSessionManager: CBPeripheralDelegate {
         if characteristic.uuid == CBUUID(string: Self.colmiNotifyUUID) {
             appendToDebugLog(direction: .received, bytes: packet)
             processBigDataChunk(packet)
-            debugPrint(packet)
+            tLog(packet)
             return
         }
 
@@ -657,14 +665,14 @@ extension RingSessionManager: CBPeripheralDelegate {
         case RingSessionManager.CMD_HR_TIMING_MONITOR:
             handleHRTimingMonitorResponse(packet: packet)
         case Counter.shared.CMD_X:
-            debugPrint("🔥")
+            tLog("🔥")
         case RingSessionManager.CMD_START_REAL_TIME:
             guard packet.count >= 4 else {
-                debugPrint("Real-time response packet too short: \(packet)")
+                tLog("Real-time response packet too short: \(packet)")
                 break
             }
             guard let readingType = RealTimeReading(rawValue: packet[1]) else {
-                debugPrint("Real-Time Reading - Unknown sub-type: \(packet[1]) – full packet: \(packet)")
+                tLog("Real-Time Reading - Unknown sub-type: \(packet[1]) – full packet: \(packet)")
                 break
             }
             let errorCode = packet[2]
@@ -674,7 +682,7 @@ extension RingSessionManager: CBPeripheralDelegate {
                 let now = Date()
 
                 switch readingType {
-                case .heartRate:
+                case .heartRate, .realtimeHeartRate:
                     // Stamp every HR packet (including zeros) so the gym
                     // watchdog can distinguish "stream alive but warming up"
                     // from "stream has gone silent".
@@ -691,11 +699,11 @@ extension RingSessionManager: CBPeripheralDelegate {
                     // 0xFF (255) is a known firmware artefact; valid resting-to-max
                     // range is roughly 30-220 BPM.
                     guard readingValue <= 220 else {
-                        debugPrint("[RealTime] Ignoring out-of-range HR: \(readingValue)")
+                        tLog("[RealTime] Ignoring out-of-range HR: \(readingValue)")
                         break
                     }
                     realTimeHeartRateBPM = Int(readingValue)
-                    if now.timeIntervalSince(lastInfluxHRWrite) >= influxWriteInterval {
+                    if now.timeIntervalSince(lastInfluxHRWrite) >= currentInfluxWriteInterval {
                         lastInfluxHRWrite = now
                         Task { @MainActor in
                             InfluxDBWriter.shared.writeHeartRates([(bpm: Int(readingValue), time: now)])
@@ -704,7 +712,7 @@ extension RingSessionManager: CBPeripheralDelegate {
                 case .spo2:
                     guard readingValue > 0 else { break }
                     realTimeBloodOxygenPercent = Int(readingValue)
-                    if now.timeIntervalSince(lastInfluxSpO2Write) >= influxWriteInterval {
+                    if now.timeIntervalSince(lastInfluxSpO2Write) >= currentInfluxWriteInterval {
                         lastInfluxSpO2Write = now
                         Task { @MainActor in
                             InfluxDBWriter.shared.writeSpO2(value: Double(readingValue), time: now)
@@ -716,7 +724,7 @@ extension RingSessionManager: CBPeripheralDelegate {
                     guard readingValue > 0 else { break }
                     let celsius = (Double(readingValue) + 200.0) / 10.0
                     realTimeTemperatureCelsius = celsius
-                    if now.timeIntervalSince(lastInfluxTempWrite) >= influxWriteInterval {
+                    if now.timeIntervalSince(lastInfluxTempWrite) >= currentInfluxWriteInterval {
                         lastInfluxTempWrite = now
                         Task { @MainActor in
                             InfluxDBWriter.shared.writeTemperature(celsius: celsius, time: now)
@@ -725,19 +733,38 @@ extension RingSessionManager: CBPeripheralDelegate {
                 default:
                     break
                 }
-                debugPrint("Real-Time Reading - Type: \(readingType), Value: \(readingValue)")
+                tLog("Real-Time Reading - Type: \(readingType), Value: \(readingValue)")
             } else {
-                debugPrint("Error in reading - Type: \(readingType), Error Code: \(errorCode)")
+                tLog("Error in reading - Type: \(readingType), Error Code: \(errorCode)")
+            }
+        case RingSessionManager.CMD_REAL_TIME_HEART_RATE:
+            // Response to DataType=6 (realtimeHeartRate) streaming.
+            // Packet format: [30, heartRate, 0, ..., checksum]
+            let hrValue = packet[1]
+            let now = Date()
+            lastRealTimeHRPacketTime = now
+
+            if hrValue == 0 {
+                if isWorkoutActive { realTimeHeartRateBPM = nil }
+                tLog("[RT-HR30] heartRate=0 (warmup)")
+            } else if hrValue <= 220 {
+                realTimeHeartRateBPM = Int(hrValue)
+                tLog("[RT-HR30] heartRate=\(hrValue)")
+                if now.timeIntervalSince(lastInfluxHRWrite) >= currentInfluxWriteInterval {
+                    lastInfluxHRWrite = now
+                    Task { @MainActor in
+                        InfluxDBWriter.shared.writeHeartRates([(bpm: Int(hrValue), time: now)])
+                    }
+                }
+            } else {
+                tLog("[RT-HR30] Ignoring out-of-range HR: \(hrValue)")
             }
         case RingSessionManager.CMD_STOP_REAL_TIME:
             // The ring auto-stops real-time streaming after ~60 s.
             // If a workout is active, immediately restart with a fresh START.
-            // NOTE: CONTINUE (action=3) was tried but on R02 firmware it still
-            // triggers a full ~30 s PPG warmup, so START is equally effective
-            // and more reliable.  No delay — the ring has already stopped.
             if isWorkoutActive {
-                debugPrint("[RealTime] Ring auto-stopped stream — restarting for active workout")
-                startRealTimeStreaming(type: .heartRate)
+                tLog("[RealTime] Ring auto-stopped stream — restarting for active workout")
+                startRealTimeStreaming(type: .realtimeHeartRate)
             }
             break
         case RingSessionManager.CMD_SLEEP_DATA:
@@ -757,24 +784,26 @@ extension RingSessionManager: CBPeripheralDelegate {
             handleTrackingSettingResponse(packet: packet)
         case RingSessionManager.CMD_SPORT_REAL_TIME:
             handleSportRealTimeResponse(packet: packet)
+        case 158: // 0x9E — ack from CMD_REAL_TIME_HEART_RATE (30) continue keepalive (30+128)
+            break
         default:
             // Log unhandled opcodes so we can identify sleep/other response formats
-            debugPrint("Unhandled response opcode: \(packet[0]) (0x\(String(format: "%02x", packet[0]))) – full packet: \(packet)")
+            tLog("Unhandled response opcode: \(packet[0]) (0x\(String(format: "%02x", packet[0]))) – full packet: \(packet)")
             break
         }
         
         if characteristic.uuid == CBUUID(string: Self.uartTxCharacteristicUUID) {
             if let value = characteristic.value {
-                debugPrint("Received value: \(value) : \([UInt8](value))")
+                tLog("Received value: \(value) : \([UInt8](value))")
             }
         }
     }
     
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
-            debugPrint("Write to characteristic failed: \(error.localizedDescription)")
+            tLog("Write to characteristic failed: \(error.localizedDescription)")
         } else {
-            debugPrint("Write to characteristic successful")
+            tLog("Write to characteristic successful")
         }
     }
 }
@@ -788,7 +817,7 @@ extension RingSessionManager {
             appendToDebugLog(direction: .sent, bytes: blinkTwicePacket)
             sendPacket(packet: blinkTwicePacket)
         } catch {
-            debugPrint("Failed to create blink twice packet: \(error)")
+            tLog("Failed to create blink twice packet: \(error)")
         }
     }
 }
@@ -819,14 +848,14 @@ extension RingSessionManager {
     /// Send a Big Data request on the Colmi service. Request: magic 188, dataId, dataLen=0, crc16=0xFFFF.
     func sendBigDataRequest(dataId: UInt8) {
         guard let colmiWriteCharacteristic, let peripheral else {
-            debugPrint("Cannot send Big Data request. Colmi write characteristic or peripheral not ready.")
+            tLog("Cannot send Big Data request. Colmi write characteristic or peripheral not ready.")
             return
         }
         let request = Self.makeBigDataRequestPacket(dataId: dataId)
         let data = Data(request)
         peripheral.writeValue(data, for: colmiWriteCharacteristic, type: .withResponse)
         appendToDebugLog(direction: .sent, bytes: request)
-        debugPrint("Big Data request sent – dataId: \(dataId), command: \(request)")
+        tLog("Big Data request sent – dataId: \(dataId), command: \(request)")
     }
 
     private func processBigDataChunk(_ chunk: [UInt8]) {
@@ -854,18 +883,18 @@ extension RingSessionManager {
         switch dataId {
         case Self.bigDataSleepId:
             if let sleepData = BigDataSleepParser.parseSleepPayload(payload) {
-                debugPrint("Big Data sleep received – \(sleepData.sleepDays) day(s)")
+                tLog("Big Data sleep received – \(sleepData.sleepDays) day(s)")
                 bigDataSleepCallback?(sleepData)
                 bigDataSleepPersistenceCallback?(sleepData)
             } else {
-                debugPrint("Big Data sleep parse failed – payload length: \(payload.count)")
+                tLog("Big Data sleep parse failed – payload length: \(payload.count)")
             }
         case Self.bigDataBloodOxygenId:
-            debugPrint("Big Data blood oxygen received – payload length: \(payload.count)")
+            tLog("Big Data blood oxygen received – payload length: \(payload.count)")
             bigDataBloodOxygenPayloadCallback?(payload)
             bigDataBloodOxygenPayloadPersistenceCallback?(payload)
         default:
-            debugPrint("Big Data response – dataId: \(dataId), payload length: \(payload.count)")
+            tLog("Big Data response – dataId: \(dataId), payload length: \(payload.count)")
         }
     }
 }
@@ -895,12 +924,25 @@ extension RingSessionManager {
     private func sendKeepalive() {
         keepaliveWorkItem = nil
         guard peripheralConnected, characteristicsDiscovered else { return }
+
+        // During a workout the real-time HR stream is running.  Sending
+        // CMD_BATTERY mid-stream appears to disrupt the PPG sensor pipeline
+        // on the R02 firmware, causing the stream to die silently (no
+        // CMD_STOP, no zero packets — just silence).  Skip the battery
+        // read and reschedule; the next keepalive after the workout ends
+        // will pick up battery status.
+        if isWorkoutActive {
+            tLog("[Keepalive] Workout active — skipping battery read to protect HR stream")
+            scheduleNextKeepalive()
+            return
+        }
+
         do {
             let packet = try makePacket(command: Self.CMD_BATTERY)
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
         } catch {
-            debugPrint("Keepalive packet failed: \(error)")
+            tLog("Keepalive packet failed: \(error)")
         }
         scheduleNextKeepalive()
     }
@@ -911,21 +953,21 @@ extension RingSessionManager {
 extension RingSessionManager {
     /// Runs when the app has connected to the ring and discovered characteristics. Requests battery, sleep (Big Data), and heart rate log with staggered delays.
     func syncOnConnect() {
-        debugPrint("Sync on connect: starting…")
+        tLog("Sync on connect: starting…")
         getBatteryStatus { _ in }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self else { return }
             // Skip if a workout started while we were waiting — BLE sync
             // commands flood the channel and disrupt the real-time HR stream.
             guard !self.isWorkoutActive else {
-                debugPrint("[SyncOnConnect] Workout active — skipping sleep sync")
+                tLog("[SyncOnConnect] Workout active — skipping sleep sync")
                 return
             }
             self.syncSleep(dayOffset: 0)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self, !self.isWorkoutActive else {
-                debugPrint("[SyncOnConnect] Workout active — skipping HR log sync")
+                tLog("[SyncOnConnect] Workout active — skipping HR log sync")
                 return
             }
             self.getHeartRateLog { _ in }
@@ -960,33 +1002,34 @@ extension RingSessionManager {
     private func ensureHRLogSettings() async {
         let savedInterval = UserDefaults.standard.object(forKey: "hrLogInterval") as? Int ?? 5
         let ringSettings = try? await readHRLogSettings()
-        debugPrint("[SyncOnConnect] HR log settings: enabled=\(ringSettings?.enabled ?? false), interval=\(ringSettings?.intervalMinutes ?? 0)min")
+        tLog("[SyncOnConnect] HR log settings: enabled=\(ringSettings?.enabled ?? false), interval=\(ringSettings?.intervalMinutes ?? 0)min")
 
         let needsWrite = ringSettings == nil
             || !ringSettings!.enabled
             || ringSettings!.intervalMinutes != savedInterval
 
         if needsWrite {
-            debugPrint("[SyncOnConnect] Writing HR log settings: enabled=true, interval=\(savedInterval)min")
+            tLog("[SyncOnConnect] Writing HR log settings: enabled=true, interval=\(savedInterval)min")
             do {
                 try await writeTrackingSetting(.heartRate, enabled: true)
                 try await writeHRLogSettings(enabled: true, intervalMinutes: savedInterval)
-                debugPrint("[SyncOnConnect] HR log settings written successfully")
+                tLog("[SyncOnConnect] HR log settings written successfully")
             } catch {
-                debugPrint("[SyncOnConnect] Failed to write HR log settings: \(error)")
+                tLog("[SyncOnConnect] Failed to write HR log settings: \(error)")
             }
         }
 
         startPeriodicSync(intervalMinutes: savedInterval)
 
-        // Start continuous real-time HR streaming so we get per-minute data points.
-        // Skip if a workout is already running — GymSessionManager owns the stream
-        // and sending another START here would reset the PPG sensor mid-warmup.
+        // Only start continuous real-time HR streaming if a workout is active.
+        // Outside workouts the ring's built-in HR logging (1-min interval) is
+        // sufficient, and the green LED flashing continuously is distracting
+        // (e.g. during sleep).
         if isWorkoutActive {
-            debugPrint("[SyncOnConnect] Workout active — skipping real-time stream start")
+            tLog("[SyncOnConnect] Workout active — starting real-time HR stream")
+            startRealTimeStreaming(type: .realtimeHeartRate)
         } else {
-            debugPrint("[SyncOnConnect] Starting real-time HR stream")
-            startRealTimeStreaming(type: .heartRate)
+            tLog("[SyncOnConnect] No workout — relying on ring's periodic HR logging")
         }
     }
 
@@ -994,7 +1037,7 @@ extension RingSessionManager {
     private func startPeriodicSync(intervalMinutes: Int) {
         stopPeriodicSync()
         let interval = TimeInterval(max(intervalMinutes, 1) * 60)
-        debugPrint("[PeriodicSync] Starting periodic sync every \(intervalMinutes) min")
+        tLog("[PeriodicSync] Starting periodic sync every \(intervalMinutes) min")
         periodicSyncTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.runPeriodicSync()
@@ -1015,13 +1058,11 @@ extension RingSessionManager {
         // auto-restart handler and the GymSessionManager watchdog.
         // Sending ANY command (even a continue) mid-stream can disrupt it.
         if isWorkoutActive {
-            debugPrint("[PeriodicSync] Workout active — skipping entirely")
+            tLog("[PeriodicSync] Workout active — skipping entirely")
             return
         }
 
-        debugPrint("[PeriodicSync] Syncing HR log, HRV, SpO2, stress, activity…")
-        // Restart the real-time HR stream (ring auto-stops after ~2 min)
-        startRealTimeStreaming(type: .heartRate)
+        tLog("[PeriodicSync] Syncing HR log, HRV, SpO2, stress, activity…")
         getHeartRateLog { _ in }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             self?.syncHRVData(dayOffset: 0)
@@ -1059,9 +1100,9 @@ extension RingSessionManager {
             lastSleepDayOffset = dayOffset
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
-            debugPrint("Sleep data requested (Commands 68, dayOffset: \(dayOffset))")
+            tLog("Sleep data requested (Commands 68, dayOffset: \(dayOffset))")
         } catch {
-            debugPrint("Failed to create sleep packet: \(error)")
+            tLog("Failed to create sleep packet: \(error)")
         }
     }
 
@@ -1071,9 +1112,9 @@ extension RingSessionManager {
             let packet = try makePacket(command: Self.CMD_SYNC_SLEEP_LEGACY, subData: [0x27])
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
-            debugPrint("Sleep sync (legacy 0xBC 0x27) requested")
+            tLog("Sleep sync (legacy 0xBC 0x27) requested")
         } catch {
-            debugPrint("Failed to create legacy sleep packet: \(error)")
+            tLog("Failed to create legacy sleep packet: \(error)")
         }
     }
 
@@ -1093,17 +1134,17 @@ extension RingSessionManager {
             sleepQualities: sleepQualities,
             dayOffset: lastSleepDayOffset
         )
-        debugPrint("Sleep data received – date: \(year + 2000)-\(month)-\(day), time: \(time), qualities: \(sleepQualities)")
+        tLog("Sleep data received – date: \(year + 2000)-\(month)-\(day), time: \(time), qualities: \(sleepQualities)")
         sleepDataCallback?(data)
     }
 
     private func handleSleepResponse(packet: [UInt8]) {
         guard packet.count >= 2 else { return }
         let subType = packet[1]
-        debugPrint("Sleep packet (legacy 0xBC) – subType: \(subType) (0x\(String(format: "%02x", subType))), full: \(packet)")
+        tLog("Sleep packet (legacy 0xBC) – subType: \(subType) (0x\(String(format: "%02x", subType))), full: \(packet)")
         sleepPacketCallback?(packet)
         if subType == 255 {
-            debugPrint("Sleep: no data (ring returned 0xFF subtype)")
+            tLog("Sleep: no data (ring returned 0xFF subtype)")
         }
     }
 
@@ -1113,9 +1154,9 @@ extension RingSessionManager {
             let packet = try makePacket(command: Self.CMD_READ_HRV_DATA, subData: [UInt8(dayOffset & 0xFF)])
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
-            debugPrint("HRV data requested (Commands 57, dayOffset/index: \(dayOffset))")
+            tLog("HRV data requested (Commands 57, dayOffset/index: \(dayOffset))")
         } catch {
-            debugPrint("Failed to create HRV packet: \(error)")
+            tLog("Failed to create HRV packet: \(error)")
         }
     }
 
@@ -1125,9 +1166,9 @@ extension RingSessionManager {
             let packet = try makePacket(command: Self.CMD_READ_PRESSURE_DATA, subData: [UInt8(dayOffset & 0xFF)])
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
-            debugPrint("Pressure data requested (Commands 55, dayOffset/index: \(dayOffset))")
+            tLog("Pressure data requested (Commands 55, dayOffset/index: \(dayOffset))")
         } catch {
-            debugPrint("Failed to create pressure packet: \(error)")
+            tLog("Failed to create pressure packet: \(error)")
         }
     }
 
@@ -1142,9 +1183,9 @@ extension RingSessionManager {
             ])
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
-            debugPrint("Activity data requested (Commands 67, dayOffset: \(dayOffset))")
+            tLog("Activity data requested (Commands 67, dayOffset: \(dayOffset))")
         } catch {
-            debugPrint("Failed to create activity packet: \(error)")
+            tLog("Failed to create activity packet: \(error)")
         }
     }
 
@@ -1174,7 +1215,7 @@ extension RingSessionManager {
     
     func sendPacket(packet: [UInt8]) {
         guard let uartRxCharacteristic, let peripheral else {
-            debugPrint("Cannot send packet. Peripheral or characteristic not ready.")
+            tLog("Cannot send packet. Peripheral or characteristic not ready.")
             return
         }
         
@@ -1243,34 +1284,46 @@ extension RingSessionManager {
             }
         }
 
-        debugPrint("[SportRT] b4=\(b4) b10=\(b10) derivedHR=\(sportRTDerivedHR.map(String.init) ?? "nil") samples=\(sportRTBeatSamples.count) pkt=\(packet.prefix(11).map { String($0) }.joined(separator: ","))")
+        tLog("[SportRT] b4=\(b4) b10=\(b10) derivedHR=\(sportRTDerivedHR.map(String.init) ?? "nil") samples=\(sportRTBeatSamples.count) pkt=\(packet.prefix(11).map { String($0) }.joined(separator: ","))")
     }
 }
 
 // MARK: - RealTime Streaming
 
 extension RingSessionManager {
-    //    CMD_REAL_TIME_HEART_RATE = 30
-    //    CONTINUE_HEART_RATE_PACKET = make_packet(CMD_REAL_TIME_HEART_RATE, bytearray(b"3"))
-    
+    /// Send a command-30 "continue" keepalive to tell the ring to keep
+    /// the PPG sensor running.  The Colmi protocol docs say the request
+    /// type field is "only set to 3 in app".
+    func sendRealtimeHRContinue() {
+        guard peripheralConnected, characteristicsDiscovered else { return }
+        do {
+            let packet = try makePacket(command: Self.CMD_REAL_TIME_HEART_RATE, subData: [3])
+            appendToDebugLog(direction: .sent, bytes: packet)
+            sendPacket(packet: packet)
+            tLog("[RT-HR30] Sent continue keepalive")
+        } catch {
+            tLog("[RT-HR30] Continue packet failed: \(error)")
+        }
+    }
+
     func startRealTimeStreaming(type: RealTimeReading) {
-        debugPrint("[RealTime] START \(type)")
+        tLog("[RealTime] START \(type)")
         sendRealTimeCommand(command: RingSessionManager.CMD_START_REAL_TIME, type: type, action: .start)
     }
 
     func continueRealTimeStreaming(type: RealTimeReading) {
-        debugPrint("[RealTime] CONTINUE \(type)")
+        tLog("[RealTime] CONTINUE \(type)")
         sendRealTimeCommand(command: RingSessionManager.CMD_START_REAL_TIME, type: type, action: .continue)
     }
 
     func stopRealTimeStreaming(type: RealTimeReading) {
-        debugPrint("[RealTime] STOP \(type)")
+        tLog("[RealTime] STOP \(type)")
         sendRealTimeCommand(command: RingSessionManager.CMD_STOP_REAL_TIME, type: type, action: nil)
     }
     
     private func sendRealTimeCommand(command: UInt8, type: RealTimeReading, action: Action?) {
         guard let uartRxCharacteristic, let peripheral else {
-            debugPrint("Cannot send real-time command. Peripheral or characteristic not ready.")
+            tLog("Cannot send real-time command. Peripheral or characteristic not ready.")
             return
         }
         
@@ -1286,7 +1339,7 @@ extension RingSessionManager {
             let data = Data(packet)
             peripheral.writeValue(data, for: uartRxCharacteristic, type: .withResponse)
         } catch {
-            debugPrint("Failed to create packet: \(error)")
+            tLog("Failed to create packet: \(error)")
         }
     }
 }
@@ -1296,7 +1349,7 @@ extension RingSessionManager {
 extension RingSessionManager {
     func getBatteryStatus(completion: @escaping (BatteryInfo) -> Void) {
         guard let uartRxCharacteristic, let peripheral else {
-            debugPrint("Cannot send battery request. Peripheral or characteristic not ready.")
+            tLog("Cannot send battery request. Peripheral or characteristic not ready.")
             return
         }
         
@@ -1308,13 +1361,13 @@ extension RingSessionManager {
             // Store completion handler to call when data is received
             self.batteryStatusCallback = completion
         } catch {
-            debugPrint("Failed to create battery packet: \(error)")
+            tLog("Failed to create battery packet: \(error)")
         }
     }
     
     private func handleBatteryResponse(packet: [UInt8]) {
         guard packet[0] == RingSessionManager.CMD_BATTERY else {
-            debugPrint("Invalid battery packet received.")
+            tLog("Invalid battery packet received.")
             return
         }
         
@@ -1362,7 +1415,7 @@ extension RingSessionManager {
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
                 guard let self, self.trackingSettingGeneration == gen, self.pendingTrackingSettingContinuation != nil else { return }
-                debugPrint("[TrackingSetting] Timeout waiting for \(setting.displayName) read response")
+                tLog("[TrackingSetting] Timeout waiting for \(setting.displayName) read response")
                 self.pendingTrackingSettingContinuation = nil
                 self.pendingTrackingSetting = nil
                 continuation.resume(throwing: RingSessionTrackingError.timeout)
@@ -1385,7 +1438,7 @@ extension RingSessionManager {
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
                 guard let self, self.trackingSettingGeneration == gen, self.pendingTrackingSettingContinuation != nil else { return }
-                debugPrint("[TrackingSetting] Timeout waiting for \(setting.displayName) write response — assuming success")
+                tLog("[TrackingSetting] Timeout waiting for \(setting.displayName) write response — assuming success")
                 self.pendingTrackingSettingContinuation = nil
                 self.pendingTrackingSetting = nil
                 continuation.resume(returning: enabled)
@@ -1411,7 +1464,7 @@ extension RingSessionManager {
 
     private func sendSettingRead(commandId: UInt8) {
         guard let uartRxCharacteristic, let peripheral else {
-            debugPrint("Cannot send settings request. Peripheral or characteristic not ready.")
+            tLog("Cannot send settings request. Peripheral or characteristic not ready.")
             return
         }
         do {
@@ -1420,13 +1473,13 @@ extension RingSessionManager {
             appendToDebugLog(direction: .sent, bytes: packet)
             peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
         } catch {
-            debugPrint("Failed to create settings packet: \(error)")
+            tLog("Failed to create settings packet: \(error)")
         }
     }
 
     private func sendSettingWrite(commandId: UInt8, isEnabled: Bool) {
         guard let uartRxCharacteristic, let peripheral else {
-            debugPrint("Cannot send settings write. Peripheral or characteristic not ready.")
+            tLog("Cannot send settings write. Peripheral or characteristic not ready.")
             return
         }
         do {
@@ -1436,7 +1489,7 @@ extension RingSessionManager {
             appendToDebugLog(direction: .sent, bytes: packet)
             peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
         } catch {
-            debugPrint("Failed to create settings write packet: \(error)")
+            tLog("Failed to create settings write packet: \(error)")
         }
     }
 }
@@ -1483,7 +1536,7 @@ extension RingSessionManager {
                 // Update local state immediately (ring doesn't always echo back on write)
                 hrLogEnabled = enabled
                 hrLogIntervalMinutes = intervalMinutes
-                debugPrint("[HRLogSettings] Wrote enabled=\(enabled), interval=\(intervalMinutes)min")
+                tLog("[HRLogSettings] Wrote enabled=\(enabled), interval=\(intervalMinutes)min")
                 continuation.resume()
             } catch {
                 continuation.resume(throwing: error)
@@ -1493,14 +1546,14 @@ extension RingSessionManager {
 
     private func handleHRTimingMonitorResponse(packet: [UInt8]) {
         guard packet.count >= 3, packet[0] == Self.CMD_HR_TIMING_MONITOR else {
-            debugPrint("[HRLogSettings] Invalid HR timing monitor packet: \(packet)")
+            tLog("[HRLogSettings] Invalid HR timing monitor packet: \(packet)")
             return
         }
         let enabled = packet[1] != 0
         let interval = Int(packet[2])
         hrLogEnabled = enabled
         hrLogIntervalMinutes = interval
-        debugPrint("[HRLogSettings] Response: enabled=\(enabled), interval=\(interval)min")
+        tLog("[HRLogSettings] Response: enabled=\(enabled), interval=\(interval)min")
 
         if let continuation = pendingHRLogSettingsContinuation {
             pendingHRLogSettingsContinuation = nil
@@ -1522,7 +1575,7 @@ extension RingSessionManager {
 
     func getHeartRateLog(completion: @escaping (HeartRateLog) -> Void) {
         guard let uartRxCharacteristic, let peripheral else {
-            debugPrint("Cannot send heart rate log request. Peripheral or characteristic not ready.")
+            tLog("Cannot send heart rate log request. Peripheral or characteristic not ready.")
             return
         }
         
@@ -1534,18 +1587,18 @@ extension RingSessionManager {
             let data = Data(packet)
             peripheral.writeValue(data, for: uartRxCharacteristic, type: .withResponse)
             
-            debugPrint("HRL Commmand Sent")
+            tLog("HRL Commmand Sent")
             
             // Store completion handler to call when data is received
             self.heartRateLogCallback = completion
         } catch {
-            debugPrint("Failed to create hrl packet: \(error)")
+            tLog("Failed to create hrl packet: \(error)")
         }
     }
     
     private func handleHeartRateLogResponse(packet: [UInt8]) {
         guard packet[0] == RingSessionManager.CMD_READ_HEART_RATE else {
-            debugPrint("Invalid heart rate log packet received.")
+            tLog("Invalid heart rate log packet received.")
             return
         }
         
@@ -1566,7 +1619,7 @@ extension RingSessionManager {
             let xPacket = try makePacket(command: Counter.shared.CMD_X, subData: nil)
             sendPacket(packet: xPacket)
         } catch {
-            debugPrint("Failed to create blink twice packet: \(error)")
+            tLog("Failed to create blink twice packet: \(error)")
         }
     }
 }

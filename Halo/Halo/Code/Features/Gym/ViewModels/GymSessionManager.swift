@@ -73,12 +73,14 @@ class GymSessionManager {
     private static let hapticsKey = "gymHapticsEnabled"
     private static let hrPollInterval: TimeInterval = 1.0
 
-    /// Safety-net watchdog: if no HR packets arrive for this long, the stream
-    /// probably died silently (ring auto-stops after ~60 s and sends CMD_STOP,
-    /// which the RingSessionManager handler catches and restarts).  This
-    /// watchdog only fires if that CMD_STOP event was missed (e.g. BLE packet
-    /// loss).  Must be > 60 s to avoid interfering with a running stream.
-    private static let streamDeadThreshold: TimeInterval = 70.0
+    /// Aggressive watchdog: the ring's firmware silently stops 0x69 packets
+    /// after a brief measurement (~5 s of valid HR) without sending CMD_STOP.
+    /// When the stream was recently active (packets flowing ≤ 5 s ago), we
+    /// detect silence quickly (streamSilenceThreshold = 8 s).  After a
+    /// restart we allow a longer grace period (streamColdStartThreshold = 40 s)
+    /// for the PPG warmup cycle before deciding the stream died again.
+    private static let streamSilenceThreshold: TimeInterval = 8.0
+    private static let streamColdStartThreshold: TimeInterval = 40.0
 
     private weak var ringManager: RingSessionManager?
     private var timerTask: Task<Void, Never>?
@@ -92,6 +94,14 @@ class GymSessionManager {
     /// Tracks whether we already sent a watchdog restart for the current silence.
     /// Reset when fresh HR packets arrive.
     private var watchdogFired = false
+    /// When the last watchdog restart was issued.  Used to apply the longer
+    /// cold-start threshold immediately after a restart (PPG warmup takes ~25-33 s).
+    private var lastWatchdogRestartTime: Date?
+
+    /// When the last command-30 continue keepalive was sent.
+    private var lastContinueKeepAliveTime: Date?
+    /// How often to send a command-30 continue to keep the PPG sensor alive.
+    private static let continueKeepAliveInterval: TimeInterval = 15.0
 
     // Haptics
     private let hapticEngine = UIImpactFeedbackGenerator(style: .heavy)
@@ -150,9 +160,10 @@ class GymSessionManager {
         // flood the BLE channel with data requests and kill the real-time stream.
         ringManager?.isWorkoutActive = true
 
-        // Kick off a fresh real-time HR stream immediately so we don't have to wait
-        // for the next periodic sync cycle (up to 1 min away).
-        ringManager?.startRealTimeStreaming(type: .heartRate)
+        // Use DataType=6 (realtimeHeartRate) for workouts.  Responses arrive
+        // on command 30 instead of 105.  This may give us continuous PPG
+        // measurement instead of the brief ~5 s spot-check that DataType=1 does.
+        ringManager?.startRealTimeStreaming(type: .realtimeHeartRate)
 
         // Start timer loop
         timerTask = Task { [weak self] in
@@ -301,15 +312,21 @@ class GymSessionManager {
                     lastSampleTime = now
                 }
 
-                debugPrint("[GymTick] Using sport RT derived HR: \(derivedBPM) BPM")
+                tLog("[GymTick] Using sport RT derived HR: \(derivedBPM) BPM")
             } else if currentBPM > 0 {
                 // No derived HR yet — hold last known value.
             } else {
                 currentBPM = 0
             }
+        } else if currentBPM > 0 && hrPacketAge < 30.0 {
+            // Stream just went silent but we had a valid reading recently.
+            // Hold the last known HR for up to 30 s while the watchdog
+            // restarts the stream and the sensor warms up again.  This
+            // avoids flickering "warming up…" every cycle.
+            // (Don't record new samples — the value is stale.)
         } else {
-            // Ring is sending zeros (sensor warmup) or no data — show warmup
-            // indicator instead of a frozen stale value.
+            // Genuinely no data for a while or never had a reading.
+            // Show warmup indicator.
             currentBPM = 0
         }
 
@@ -321,28 +338,56 @@ class GymSessionManager {
         lastZoneTickTime = now
 
         // ── Watchdog ───────────────────────────────────────────────
-        // The ring's firmware monopolises the PPG sensor when sport RT
-        // (0x73) is active, causing the 0x69 HR stream to go silent.
-        // This is expected — don't restart the stream during sport RT
-        // as that would just trigger another ~30 s warmup for nothing.
+        // The ring's firmware silently stops 0x69 packets after a brief
+        // measurement (~5 s of valid HR) without sending CMD_STOP.
+        // We detect this silence and restart aggressively.
         //
-        // Only restart when BOTH the HR stream AND sport RT have been
-        // silent for a while (stream truly dead, not just displaced).
+        // Two thresholds:
+        //   • streamSilenceThreshold (8 s) — used when the stream was
+        //     recently active (packets were flowing).
+        //   • streamColdStartThreshold (40 s) — used right after a
+        //     restart, giving the PPG sensor time to warm up before we
+        //     decide the stream is dead again.
+        //
+        // Sport RT (0x73) can displace the 0x69 stream; don't restart
+        // if sport RT is still active.
 
         if let lastPacket = ringManager?.lastRealTimeHRPacketTime {
             let age = now.timeIntervalSince(lastPacket)
 
-            if age < 5.0 {
+            if age < 3.0 {
                 // Fresh packets arriving — reset watchdog flag
                 watchdogFired = false
-            } else if age >= Self.streamDeadThreshold && !sportRTActive && !watchdogFired {
-                // No HR packets AND no sport RT — stream is truly dead.
-                // Restart with a fresh START.
-                debugPrint("[GymWatchdog] No HR packets for \(Int(age))s (no sport RT) — restarting stream")
-                ringManager?.startRealTimeStreaming(type: .heartRate)
-                ringManager?.lastRealTimeHRPacketTime = now  // Prevent re-firing
-                watchdogFired = true
+            } else if !sportRTActive && !watchdogFired {
+                // Pick the right threshold: cold-start (just restarted)
+                // or silence (was recently active).
+                let inColdStart: Bool
+                if let restartTime = lastWatchdogRestartTime {
+                    inColdStart = now.timeIntervalSince(restartTime) < Self.streamColdStartThreshold
+                } else {
+                    // First cycle after workout start — treat as cold start
+                    inColdStart = true
+                }
+                let threshold = inColdStart ? Self.streamColdStartThreshold : Self.streamSilenceThreshold
+
+                if age >= threshold {
+                    tLog("[GymWatchdog] No HR packets for \(Int(age))s (\(inColdStart ? "cold start" : "silence")) — restarting stream")
+                    ringManager?.startRealTimeStreaming(type: .realtimeHeartRate)
+                    ringManager?.lastRealTimeHRPacketTime = now  // Prevent re-firing
+                    watchdogFired = true
+                    lastWatchdogRestartTime = now
+                }
             }
+        }
+
+        // ── Command-30 continue keepalive ────────────────────────────
+        // Periodically tell the ring to keep the PPG sensor alive.
+        // This may be the mechanism the firmware expects to sustain
+        // continuous measurement in DataType=6 mode.
+        let sinceLastContinue = lastContinueKeepAliveTime.map { now.timeIntervalSince($0) } ?? .infinity
+        if sinceLastContinue >= Self.continueKeepAliveInterval {
+            ringManager?.sendRealtimeHRContinue()
+            lastContinueKeepAliveTime = now
         }
     }
 
@@ -410,6 +455,9 @@ class GymSessionManager {
         lastSampleTime = nil
         lastZoneTickTime = nil
         previousZone = .rest
+        watchdogFired = false
+        lastWatchdogRestartTime = nil
+        lastContinueKeepAliveTime = nil
     }
 }
 

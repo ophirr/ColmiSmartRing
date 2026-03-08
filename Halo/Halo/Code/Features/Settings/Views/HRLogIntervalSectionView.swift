@@ -166,7 +166,7 @@ struct HRLogIntervalSectionView: View {
                 }
                 try await ringSessionManager.writeHRLogSettings(enabled: enabled, intervalMinutes: interval)
             } catch {
-                debugPrint("[HRLogInterval] Write failed: \(error)")
+                tLog("[HRLogInterval] Write failed: \(error)")
             }
         }
     }

@@ -15,9 +15,9 @@ final class AppleHealthActivityWriter {
             let samples = makeSamples(timestamp: timestamp, steps: steps, calories: calories)
             guard !samples.isEmpty else { return }
             try await save(samples)
-            debugPrint("[HealthKit] Activity samples written: \(samples.count)")
+            tLog("[HealthKit] Activity samples written: \(samples.count)")
         } catch {
-            debugPrint("[HealthKit] Failed to write activity samples: \(error)")
+            tLog("[HealthKit] Failed to write activity samples: \(error)")
         }
     }
 

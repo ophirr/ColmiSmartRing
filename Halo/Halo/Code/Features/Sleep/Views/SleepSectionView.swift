@@ -150,16 +150,16 @@ struct SleepSectionView: View {
             )
         }
 
-        debugPrint("=========== SWIFTDATA SAVE: Sleep ===========")
-        debugPrint("insertedDays: \(insertedDays), updatedDays: \(updatedDays), totalDays: \(bigData.days.count)")
-        debugPrint("days: [\(dayLogs.joined(separator: ", "))]")
+        tLog("=========== SWIFTDATA SAVE: Sleep ===========")
+        tLog("insertedDays: \(insertedDays), updatedDays: \(updatedDays), totalDays: \(bigData.days.count)")
+        tLog("days: [\(dayLogs.joined(separator: ", "))]")
         do {
             try modelContext.save()
-            debugPrint("result: SUCCESS")
+            tLog("result: SUCCESS")
         } catch {
-            debugPrint("result: FAILED - \(error)")
+            tLog("result: FAILED - \(error)")
         }
-        debugPrint("=============================================")
+        tLog("=============================================")
     }
 
     private func makeStoredPeriods(from day: SleepDay, nightDate: Date) -> [StoredSleepPeriod] {
