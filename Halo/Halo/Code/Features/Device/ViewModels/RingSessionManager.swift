@@ -85,6 +85,10 @@ class RingSessionManager: NSObject {
     private let sportRTWindowSeconds: TimeInterval = 10.0
     /// Latest real-time blood oxygen reading in percent.
     var realTimeBloodOxygenPercent: Int?
+    /// Timer that sends continue keepalives to keep the SpO2 measurement alive.
+    private var spo2ContinueTimer: Timer?
+    /// True while SpO2 streaming is active.
+    var isSpO2StreamActive = false
     /// Latest real-time body temperature in °C (e.g. 36.3).
     var realTimeTemperatureCelsius: Double?
     /// Latest battery info reported by the ring.
@@ -228,6 +232,13 @@ class RingSessionManager: NSObject {
     private static let CMD_REAL_TIME_HEART_RATE: UInt8 = 30
     
     
+    /// Pathway A: general-purpose real-time start/response (0x6A).
+    /// Used for SpO2 (DataType=3) and other non-HR measurements.
+    /// NOT the same as CMD_STOP_REAL_TIME (which is 0x6A but used for HR auto-stop).
+    private static let CMD_PATHWAY_A: UInt8 = 0x6A       // 106
+    /// Pathway A: stop command (0x6B).
+    private static let CMD_PATHWAY_A_STOP: UInt8 = 0x6B  // 107
+
     private static let CMD_BLOOD_OXYGEN: UInt8 = 44
     
 
@@ -826,11 +837,8 @@ extension RingSessionManager: CBPeripheralDelegate {
                         }
                     }
                 case .spo2:
-                    // R02 firmware does not support real-time SpO2 streaming
-                    // (always returns 0).  SpO2 data comes from historical
-                    // hourly logs instead.  We still update the UI if a
-                    // non-zero value somehow arrives.
-                    guard readingValue > 0 else { break }
+                    tLog("[SpO2] Response on 0x69 — value=\(readingValue) error=\(errorCode) pkt=\(packet.prefix(6).map { String(format: "%02x", $0) }.joined(separator: " "))")
+                    guard readingValue > 0, readingValue <= 100 else { break }
                     realTimeBloodOxygenPercent = Int(readingValue)
 
                     if now.timeIntervalSince(lastInfluxSpO2Write) >= currentInfluxWriteInterval {
@@ -906,15 +914,29 @@ extension RingSessionManager: CBPeripheralDelegate {
                 tLog("[RT-HR30] Ignoring out-of-range HR: \(hrValue)")
             }
         case RingSessionManager.CMD_STOP_REAL_TIME:
-            // The ring auto-stops real-time streaming after ~60 s.
-            // Restart if a workout or user-toggled continuous stream is active.
-            if isWorkoutActive || isContinuousHRStreamActive {
-                tLog("[RealTime] Ring auto-stopped stream — restarting (\(isWorkoutActive ? "workout" : "continuous"))")
-                startRealTimeStreaming(type: .realtimeHeartRate)
+            // 0x6A serves double duty:
+            //   (a) HR auto-stop notification (Pathway B)
+            //   (b) Pathway A data response (SpO2 etc.) — packet[1]=DataType, packet[2]=error, packet[3]=value
+            if packet.count >= 4, let dataType = RealTimeReading(rawValue: packet[1]), dataType == .spo2 {
+                // Pathway A SpO2 data response
+                let errorCode = packet[2]
+                let value = packet[3]
+                tLog("[SpO2] Response on 0x6A — DataType=\(dataType) error=\(errorCode) value=\(value) pkt=\(packet.prefix(6).map { String(format: "%02x", $0) }.joined(separator: " "))")
+                if errorCode == 0 && value > 0 && value <= 100 {
+                    realTimeBloodOxygenPercent = Int(value)
+                }
             } else {
-                tLog("[RealTime] Stream stopped — clearing live HR")
-                realTimeHeartRateBPM = nil
+                // HR auto-stop notification
+                if isWorkoutActive || isContinuousHRStreamActive {
+                    tLog("[RealTime] Ring auto-stopped stream — restarting (\(isWorkoutActive ? "workout" : "continuous"))")
+                    startRealTimeStreaming(type: .realtimeHeartRate)
+                } else {
+                    tLog("[RealTime] Stream stopped (0x6A) — pkt=\(packet.prefix(4).map { String(format: "%02x", $0) }.joined(separator: " "))")
+                    realTimeHeartRateBPM = nil
+                }
             }
+        case RingSessionManager.CMD_PATHWAY_A_STOP:  // 0x6B
+            tLog("[SpO2] Stop notification (0x6B) — pkt=\(packet.prefix(4).map { String(format: "%02x", $0) }.joined(separator: " "))")
         case RingSessionManager.CMD_SLEEP_DATA:
             handleSleepDataResponse(packet: packet)
         case RingSessionManager.CMD_SYNC_SLEEP_LEGACY:
@@ -1590,6 +1612,57 @@ extension RingSessionManager {
             peripheral.writeValue(data, for: uartRxCharacteristic, type: .withResponse)
         } catch {
             tLog("Failed to create packet: \(error)")
+        }
+    }
+    // MARK: - SpO2 Streaming via 0x69
+
+    func startSpO2Streaming() {
+        tLog("[SpO2] START — sending 0x69 DataType=3 Action=Start")
+        isSpO2StreamActive = true
+        sendSpO2Packet(payload: [RealTimeReading.spo2.rawValue, Action.start.rawValue])
+
+        // Start a 2-second continue keepalive timer
+        spo2ContinueTimer?.invalidate()
+        spo2ContinueTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self, self.isSpO2StreamActive else { return }
+            self.sendSpO2Continue()
+        }
+    }
+
+    func stopSpO2Streaming() {
+        tLog("[SpO2] STOP")
+        isSpO2StreamActive = false
+        spo2ContinueTimer?.invalidate()
+        spo2ContinueTimer = nil
+        // Send stop via 0x6A (same mechanism HR uses to stop — CMD_STOP_REAL_TIME)
+        // with DataType=3 (SpO2) in byte[1].
+        guard let uartRxCharacteristic, let peripheral else { return }
+        do {
+            let packet = try makePacket(command: Self.CMD_STOP_REAL_TIME, subData: [RealTimeReading.spo2.rawValue])
+            let hex = packet.map { String(format: "%02x", $0) }.joined(separator: " ")
+            tLog("[SpO2] Stop packet (0x6A): \(hex)")
+            peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
+        } catch {
+            tLog("[SpO2] Stop packet failed: \(error)")
+        }
+    }
+
+    private func sendSpO2Continue() {
+        sendSpO2Packet(payload: [RealTimeReading.spo2.rawValue, Action.continue.rawValue])
+    }
+
+    private func sendSpO2Packet(payload: [UInt8]) {
+        guard let uartRxCharacteristic, let peripheral else {
+            tLog("[SpO2] Not connected")
+            return
+        }
+        do {
+            let packet = try makePacket(command: Self.CMD_START_REAL_TIME, subData: payload)
+            let hex = packet.map { String(format: "%02x", $0) }.joined(separator: " ")
+            tLog("[SpO2] Sending: \(hex)")
+            peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
+        } catch {
+            tLog("[SpO2] Packet failed: \(error)")
         }
     }
 }

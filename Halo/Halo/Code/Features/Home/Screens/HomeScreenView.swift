@@ -59,6 +59,14 @@ struct HomeScreenView: View {
                         activityLabel: latestActivity?.label ?? ""
                     )
                 }
+                // TEMP: SpO2 test buttons
+                Section("SpO2 Test") {
+                    Button("Start SpO2") { ringSessionManager.startSpO2Streaming() }
+                    Button("Stop SpO2") { ringSessionManager.stopSpO2Streaming() }
+                    if let spo2 = ringSessionManager.realTimeBloodOxygenPercent {
+                        Text("SpO2: \(spo2)%").font(.title2.weight(.semibold)).foregroundStyle(.cyan)
+                    }
+                }
                 Section(L10n.Sleep.sectionTitle) {
                     if todaySleepSamples.isEmpty {
                         Text(L10n.Graphs.noSleepData)
