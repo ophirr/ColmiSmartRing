@@ -836,10 +836,19 @@ extension RingSessionManager: CBPeripheralDelegate {
                         }
                     }
                 case .temperature:
-                    // Ring sends raw byte = (temp_celsius * 10) - 200
-                    // e.g. raw 163 → (163 + 200) / 10.0 = 36.3 °C
-                    guard readingValue > 0 else { break }
-                    let celsius = (Double(readingValue) + 200.0) / 10.0
+                    // Temperature uses a 16-bit LE value at bytes[6-7], not byte[3].
+                    // byte[3] is always 0 for temperature packets.
+                    // Raw 16-bit value / 20.0 = degrees Celsius.
+                    // e.g. raw 730 → 730 / 20.0 = 36.5 °C
+                    guard packet.count >= 8 else { break }
+                    let rawTemp = Int(packet[6]) | (Int(packet[7]) << 8)
+                    guard rawTemp > 0 else { break }
+                    let celsius = Double(rawTemp) / 20.0
+                    // Sanity-check: body temperature should be 30-42°C
+                    guard celsius >= 30.0 && celsius <= 42.0 else {
+                        tLog("[RealTime] Ignoring out-of-range temp: \(celsius)°C (raw=\(rawTemp))")
+                        break
+                    }
                     realTimeTemperatureCelsius = celsius
 
                     // Spot-check: got a valid temperature — write and stop.
@@ -1523,10 +1532,11 @@ extension RingSessionManager {
         spotCheckType = type
         startRealTimeStreaming(type: type)
 
-        // Safety timeout — stop after 15 s even if no valid reading arrives.
+        // Safety timeout — temperature needs ~16s to measure, HR is faster.
+        let timeoutSeconds: UInt64 = (type == .temperature) ? 20 : 15
         spotCheckTimeoutTask?.cancel()
         spotCheckTimeoutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
             guard let self, !Task.isCancelled, self.spotCheckActive else { return }
             tLog("[SpotCheck] Timeout — stopping \(type) stream without a valid reading")
             self.spotCheckActive = false
