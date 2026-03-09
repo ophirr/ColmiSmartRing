@@ -140,6 +140,8 @@ class RingSessionManager: NSObject {
     /// 60 s gives us ~1/min InfluxDB spot-checks even when the phone is locked.
     private static let keepaliveInterval: TimeInterval = 60
     private var keepaliveWorkItem: DispatchWorkItem?
+    /// Timestamp of the last keepalive ping sent (or chain restart). Used to detect stalled chains.
+    private var lastKeepaliveSentAt: Date = Date()
 
     /// How many keepalive pings between full data syncs (HR log, HRV, SpO2, etc.).
     /// With a 60 s keepalive, 5 = full sync every ~5 minutes.
@@ -158,6 +160,8 @@ class RingSessionManager: NSObject {
     private var spotCheckType: RealTimeReading = .realtimeHeartRate
     /// Auto-stop the spot-check after this timeout even if no valid reading arrives.
     private var spotCheckTimeoutTask: Task<Void, Never>?
+    /// Last temperature reading received during the current spot-check (may be uncalibrated).
+    private var lastSpotCheckTempCelsius: Double?
 
     /// True while we're waiting for a battery response that was sent by the
     /// keepalive chain.  Prevents `handleBatteryResponse` from driving the
@@ -840,32 +844,31 @@ extension RingSessionManager: CBPeripheralDelegate {
                     // byte[3] is always 0 for temperature packets.
                     // Raw 16-bit value / 20.0 = degrees Celsius.
                     // e.g. raw 730 → 730 / 20.0 = 36.5 °C
+                    //
+                    // The ring sends uncalibrated sensor readings mid-stream
+                    // (often 50-57°C) that ramp toward the real value. Only
+                    // the final packet — typically sent right after the stop
+                    // command — contains the calibrated body temperature.
+                    // During a spot-check we therefore let the full timeout
+                    // run, then write the last reading if it is in range.
                     guard packet.count >= 8 else { break }
                     let rawTemp = Int(packet[6]) | (Int(packet[7]) << 8)
                     guard rawTemp > 0 else { break }
                     let celsius = Double(rawTemp) / 20.0
-                    // Sanity-check: body temperature should be 30-42°C
-                    guard celsius >= 30.0 && celsius <= 42.0 else {
-                        tLog("[RealTime] Ignoring out-of-range temp: \(celsius)°C (raw=\(rawTemp))")
-                        break
-                    }
+                    tLog("[RealTime] Temp raw=\(rawTemp) → \(String(format: "%.1f", celsius))°C")
+
+                    // Always stash the latest reading (even if out of range)
+                    // so the timeout handler can decide what to do with it.
+                    lastSpotCheckTempCelsius = celsius
+
+                    // For non-spot-check continuous streaming, only surface
+                    // calibrated values (30-42°C) to the UI / InfluxDB.
+                    guard celsius >= 30.0 && celsius <= 42.0 else { break }
                     realTimeTemperatureCelsius = celsius
 
-                    // Spot-check: got a valid temperature — write and stop.
-                    if spotCheckActive && spotCheckType == .temperature {
-                        tLog("[SpotCheck] Got temp \(celsius)°C — writing to InfluxDB/HealthKit and stopping stream")
-                        spotCheckActive = false
-                        spotCheckTimeoutTask?.cancel()
-                        spotCheckTimeoutTask = nil
-                        lastInfluxTempWrite = now
-                        Task { @MainActor in
-                            InfluxDBWriter.shared.writeTemperature(celsius: celsius, time: now)
-                            await self.healthHRWriter.writeTemperature(celsius: celsius, time: now)
-                        }
-                        stopRealTimeStreaming(type: .temperature)
-                        scheduleNextKeepalive()
-                        break
-                    }
+                    // During a spot-check, do NOT stop early — let the full
+                    // timeout run so the ring can finish calibrating.
+                    guard !spotCheckActive else { break }
 
                     if now.timeIntervalSince(lastInfluxTempWrite) >= currentInfluxWriteInterval {
                         lastInfluxTempWrite = now
@@ -1092,6 +1095,7 @@ extension RingSessionManager {
         }
 
         tLog("[Keepalive] Sending battery ping #\(keepalivePingCount + 1)")
+        lastKeepaliveSentAt = Date()
         awaitingKeepaliveBatteryResponse = true
         do {
             let packet = try makePacket(command: Self.CMD_BATTERY)
@@ -1530,6 +1534,7 @@ extension RingSessionManager {
         tLog("[SpotCheck] Starting brief \(type) spot-check")
         spotCheckActive = true
         spotCheckType = type
+        lastSpotCheckTempCelsius = nil
         startRealTimeStreaming(type: type)
 
         // Safety timeout — temperature needs ~16s to measure, HR is faster.
@@ -1538,10 +1543,30 @@ extension RingSessionManager {
         spotCheckTimeoutTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
             guard let self, !Task.isCancelled, self.spotCheckActive else { return }
-            tLog("[SpotCheck] Timeout — stopping \(type) stream without a valid reading")
             self.spotCheckActive = false
             self.stopRealTimeStreaming(type: type)
-            // Continue the keepalive chain even though this check failed.
+
+            // For temperature, write the last received reading if it looks
+            // like a valid body temp. The ring often only produces the
+            // calibrated value in its final packet (which may arrive a few
+            // ms after the stop command).
+            if type == .temperature, let celsius = self.lastSpotCheckTempCelsius {
+                if celsius >= 30.0 && celsius <= 42.0 {
+                    tLog("[SpotCheck] Temp timeout — writing last valid reading: \(String(format: "%.1f", celsius))°C")
+                    let now = Date()
+                    self.lastInfluxTempWrite = now
+                    Task { @MainActor in
+                        InfluxDBWriter.shared.writeTemperature(celsius: celsius, time: now)
+                        await self.healthHRWriter.writeTemperature(celsius: celsius, time: now)
+                    }
+                } else {
+                    tLog("[SpotCheck] Temp timeout — last reading \(String(format: "%.1f", celsius))°C out of body range, discarding")
+                }
+                self.lastSpotCheckTempCelsius = nil
+            } else {
+                tLog("[SpotCheck] Timeout — stopping \(type) stream without a valid reading")
+            }
+
             self.scheduleNextKeepalive()
         }
     }
@@ -1610,15 +1635,27 @@ extension RingSessionManager {
         // battery ping.  Battery reads from syncOnConnect / getBatteryStatus
         // must NOT trigger spot-checks or reschedule the chain — that caused
         // duplicate responses to pile up (every ~10 s instead of 60 s).
-        guard awaitingKeepaliveBatteryResponse else { return }
+        //
+        // However, if the chain appears stalled (no keepalive sent in 2× the
+        // expected interval), any battery response restarts it. This handles
+        // iOS suspending the app and killing the DispatchQueue timer.
+        if !awaitingKeepaliveBatteryResponse {
+            let stalledSeconds = Date().timeIntervalSince(lastKeepaliveSentAt)
+            if stalledSeconds > Self.keepaliveInterval * 2 && !spotCheckActive {
+                tLog("[Keepalive] Chain stalled for \(Int(stalledSeconds))s — restarting from unsolicited battery response")
+                lastKeepaliveSentAt = Date() // prevent re-trigger on next battery packet
+                // Fall through to drive the chain as if this were a keepalive response.
+            } else {
+                return
+            }
+        }
         awaitingKeepaliveBatteryResponse = false
 
         keepalivePingCount += 1
 
-        // Alternate spot-checks: odd pings → HR, even pings → temperature.
-        // (R02 firmware does not support real-time SpO2, so we skip that.)
+        // HR spot-check on every ping (~1 min); temperature every 5th (~5 min).
         if !isWorkoutActive && !isContinuousHRStreamActive && !spotCheckActive {
-            let type: RealTimeReading = (keepalivePingCount % 2 == 1) ? .realtimeHeartRate : .temperature
+            let type: RealTimeReading = (keepalivePingCount % 5 == 0) ? .temperature : .realtimeHeartRate
             startSpotCheck(type: type)
             // Don't schedule next keepalive now — it will be scheduled when
             // the spot-check finishes (or times out).  This prevents piling

@@ -157,7 +157,7 @@ struct HeartRateLog {
     
     func heartRatesWithTimes() throws -> [(Int, Date)] {
         return try addTimes(heartRates: heartRates, timestamp: timestamp)
-            .filter { $0.0 != 0 } // Filter out zeros (invalid / zero readings)
+            .filter { $0.0 > 0 } // Filter out zeros and -1 sentinel values
     }
 }
 
