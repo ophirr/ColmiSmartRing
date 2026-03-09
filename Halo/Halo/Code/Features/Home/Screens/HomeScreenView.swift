@@ -53,10 +53,10 @@ struct HomeScreenView: View {
                         currentBPM: ringSessionManager.realTimeHeartRateBPM,
                         isStreaming: ringSessionManager.isContinuousHRStreamActive,
                         onHeartRateTap: { ringSessionManager.toggleContinuousHRStream() },
-                        steps: latestActivity?.steps ?? PreviewData.activitySummary.steps,
-                        distanceKm: latestActivity?.distanceKm ?? PreviewData.activitySummary.distanceKm,
-                        calories: latestActivity?.calories ?? PreviewData.activitySummary.calories,
-                        activityLabel: latestActivity?.label ?? PreviewData.activitySummary.label
+                        steps: latestActivity?.steps ?? 0,
+                        distanceKm: latestActivity?.distanceKm ?? 0,
+                        calories: latestActivity?.calories ?? 0,
+                        activityLabel: latestActivity?.label ?? ""
                     )
                 }
                 Section(L10n.Sleep.sectionTitle) {

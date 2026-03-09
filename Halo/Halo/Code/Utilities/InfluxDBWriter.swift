@@ -3,10 +3,12 @@
 //  Halo
 //
 //  Streams ring data to InfluxDB Cloud via HTTP line protocol.
-//  Batches points and flushes on a timer or when a threshold is reached.
+//  Batches points and flushes after a short coalesce delay (~2 s) to fit
+//  inside the ~10 s BLE background wakeup window iOS grants.
 //
 
 import Foundation
+import UIKit
 
 // MARK: - Configuration
 
@@ -104,8 +106,11 @@ final class InfluxDBWriter {
     private var config: InfluxDBConfig?
     private var buffer: [String] = []
     private let batchSize = 50
-    private let flushInterval: TimeInterval = 30
-    private var flushTimer: Timer?
+    /// Coalesce delay: after the first write, wait this long for more writes
+    /// before flushing.  Short enough to fit inside the ~10 s BLE wakeup window
+    /// iOS grants in background.
+    private let coalesceInterval: TimeInterval = 2
+    private var coalesceWorkItem: DispatchWorkItem?
     private var totalWritten: Int = 0
     private var totalErrors: Int = 0
 
@@ -137,7 +142,6 @@ final class InfluxDBWriter {
             return
         }
         tLog("[InfluxDB] Started — writing to \(config!.bucket)@\(config!.url)")
-        startFlushTimer()
     }
 
     /// Configure and start with explicit values. Saves to UserDefaults.
@@ -146,12 +150,11 @@ final class InfluxDBWriter {
         cfg.save()
         config = cfg
         tLog("[InfluxDB] Configured — writing to \(bucket)@\(url)")
-        startFlushTimer()
     }
 
     func stop() {
-        flushTimer?.invalidate()
-        flushTimer = nil
+        coalesceWorkItem?.cancel()
+        coalesceWorkItem = nil
         flush()
         config = nil
         tLog("[InfluxDB] Stopped")
@@ -159,7 +162,9 @@ final class InfluxDBWriter {
 
     // MARK: - Write points
 
-    /// Enqueue a single line-protocol string. Auto-flushes at batchSize.
+    /// Enqueue a single line-protocol string.
+    /// Flushes immediately at batchSize, otherwise after a short coalesce delay
+    /// so that background BLE wakeups don't miss the flush window.
     func write(_ lineProtocol: String) {
         guard config != nil else {
             tLog("[InfluxDB] ⚠️ write() skipped — no config (not started)")
@@ -168,6 +173,8 @@ final class InfluxDBWriter {
         buffer.append(lineProtocol)
         if buffer.count >= batchSize {
             flush()
+        } else {
+            scheduleCoalesceFlush()
         }
     }
 
@@ -180,6 +187,8 @@ final class InfluxDBWriter {
         buffer.append(contentsOf: lines)
         if buffer.count >= batchSize {
             flush()
+        } else {
+            scheduleCoalesceFlush()
         }
     }
 
@@ -231,6 +240,8 @@ final class InfluxDBWriter {
     // MARK: - Flush
 
     func flush() {
+        coalesceWorkItem?.cancel()
+        coalesceWorkItem = nil
         guard let config, !buffer.isEmpty else { return }
         guard let url = config.writeURL(demo: demoMode) else {
             tLog("[InfluxDB] Invalid write URL")
@@ -249,15 +260,20 @@ final class InfluxDBWriter {
         request.setValue("text/plain; charset=utf-8", forHTTPHeaderField: "Content-Type")
         request.httpBody = body.data(using: .utf8)
 
-        // Fire-and-forget with error logging
+        // Request background execution time so iOS doesn't suspend us mid-POST.
+        var bgTaskID = UIBackgroundTaskIdentifier.invalid
+        bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "InfluxDB Flush") {
+            // Expiration handler — if iOS reclaims the time, just end the task.
+            UIApplication.shared.endBackgroundTask(bgTaskID)
+            bgTaskID = .invalid
+        }
+
         let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 if let error {
                     self?.totalErrors += count
                     tLog("[InfluxDB] Write failed (\(count) points): \(error.localizedDescription)")
-                    return
-                }
-                if let http = response as? HTTPURLResponse {
+                } else if let http = response as? HTTPURLResponse {
                     if http.statusCode == 204 {
                         self?.totalWritten += count
                         tLog("[InfluxDB] Wrote \(count) points (total: \(self?.totalWritten ?? 0))")
@@ -266,6 +282,11 @@ final class InfluxDBWriter {
                         let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? "no body"
                         tLog("[InfluxDB] Write error HTTP \(http.statusCode): \(body)")
                     }
+                }
+                // Release the background task assertion.
+                if bgTaskID != .invalid {
+                    UIApplication.shared.endBackgroundTask(bgTaskID)
+                    bgTaskID = .invalid
                 }
             }
         }
@@ -278,12 +299,17 @@ final class InfluxDBWriter {
         Int(date.timeIntervalSince1970)
     }
 
-    private func startFlushTimer() {
-        flushTimer?.invalidate()
-        flushTimer = Timer.scheduledTimer(withTimeInterval: flushInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.flush()
-            }
+    /// Schedule a flush after a short coalesce delay.  If a flush is already
+    /// scheduled, this is a no-op — the pending flush will pick up the new
+    /// points.  The 2 s delay lets multiple writes from a single BLE sync
+    /// batch together while still fitting inside the ~10 s background window.
+    private func scheduleCoalesceFlush() {
+        guard coalesceWorkItem == nil else { return }
+        let item = DispatchWorkItem { [weak self] in
+            self?.coalesceWorkItem = nil
+            self?.flush()
         }
+        coalesceWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + coalesceInterval, execute: item)
     }
 }

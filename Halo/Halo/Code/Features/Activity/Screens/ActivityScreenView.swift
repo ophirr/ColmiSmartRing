@@ -24,17 +24,9 @@ struct ActivityScreenView: View {
         todayActivitySamples.map { TimeSeriesPoint(time: $0.timestamp, value: Double($0.calories)) }
     }
 
-    private var chartStepsData: [TimeSeriesPoint] {
-        stepsData.isEmpty ? PreviewData.stepsPerHour : stepsData
-    }
-
-    private var chartDistanceData: [TimeSeriesPoint] {
-        distanceData.isEmpty ? PreviewData.distancePerHour : distanceData
-    }
-
-    private var chartCaloriesData: [TimeSeriesPoint] {
-        caloriesData.isEmpty ? PreviewData.caloriesPerHour : caloriesData
-    }
+    private var chartStepsData: [TimeSeriesPoint] { stepsData }
+    private var chartDistanceData: [TimeSeriesPoint] { distanceData }
+    private var chartCaloriesData: [TimeSeriesPoint] { caloriesData }
 
     var body: some View {
         NavigationStack {
