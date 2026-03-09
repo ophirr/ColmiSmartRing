@@ -161,8 +161,18 @@ final class RingDataPersistenceCoordinator {
 
     // MARK: - Activity
 
+    /// Accumulated activity packets for the current sync batch.
+    /// Flushed to SwiftData once the sync completes (or after a short delay).
+    private var activityBatch: [(packet: [UInt8], hour: Int, minute: Int, steps: Int, distanceMeters: Int, calories: Int)] = []
+    private var activityFlushWorkItem: DispatchWorkItem?
+
     private func consumeActivityPacket(_ packet: [UInt8]) {
         guard packet.count >= 11, packet[0] == 67 else { return }
+
+        // Log full packet for debugging field layout
+        let hex = packet.map { String(format: "%02X", $0) }.joined(separator: " ")
+        tLog("[Activity] Raw packet (\(packet.count)B): \(hex)")
+
         let timeSlot = Int(packet[4])
         // Firmware observed in logs uses quarter-hour slots for SportsData time:
         // 32 => 08:00, 44 => 11:00. Some variants still send 0...23.
@@ -176,16 +186,17 @@ final class RingDataPersistenceCoordinator {
             minute = (timeSlot % 4) * 15
         }
 
-        // Observed SportsData payload variant:
-        // - steps at bytes 9..10
-        // - distance meters at bytes 11..12
-        // - bytes 5..8 often contain larger cumulative counters not suitable for the per-slot graph
-        let steps = Int(packet[9]) | (Int(packet[10]) << 8)
-        let distanceMeters = Int(packet[11]) | (Int(packet[12]) << 8)
-        let distanceKm = Double(distanceMeters) / 1000.0
-        let packetCalories = Int(packet[5]) | (Int(packet[6]) << 8)
-        let estimatedCalories = Int(round(Double(steps) * 0.04))
-        let calories = (1...50).contains(packetCalories) ? packetCalories : estimatedCalories
+        // R02 firmware SportsData layout (confirmed via raw packet analysis):
+        //   bytes 5-6:  cumulative counter / sequence (increments by 1 each slot — NOT steps)
+        //   bytes 7-8:  unknown large values (NOT calories)
+        //   bytes 9-10: steps for this hour (per-slot incremental)
+        //   bytes 11-12: distance in meters for this hour (per-slot incremental)
+        // Calories are estimated from steps since the ring doesn't report them directly.
+        let steps = packet.count >= 13 ? Int(packet[9]) | (Int(packet[10]) << 8) : 0
+        let distanceMeters = packet.count >= 13 ? Int(packet[11]) | (Int(packet[12]) << 8) : 0
+        let calories = Int(round(Double(steps) * 0.04))
+
+        tLog("[Activity] slot=\(timeSlot) (\(String(format:"%02d:%02d", hour, minute)))  steps=\(steps) dist=\(distanceMeters)m cal=\(calories)")
 
         // Ignore metadata/empty activity packets.
         guard steps > 0 || distanceMeters > 0 || calories > 0 else {
@@ -193,34 +204,64 @@ final class RingDataPersistenceCoordinator {
             return
         }
 
-        let timestamp = todayAt(hour: hour, minute: minute)
+        activityBatch.append((packet: packet, hour: hour, minute: minute, steps: steps, distanceMeters: distanceMeters, calories: calories))
 
+        // Schedule a flush after a short delay so all packets from this sync
+        // arrive before we wipe-and-rewrite today's samples.
+        activityFlushWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.flushActivityBatch()
+        }
+        activityFlushWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: item)
+    }
+
+    /// Replace all of today's activity samples with the latest batch from the ring.
+    /// The ring re-sends the full day on every sync, so a clean replace avoids
+    /// stale/duplicate entries from timestamp changes or byte-layout fixes.
+    private func flushActivityBatch() {
+        let batch = activityBatch
+        activityBatch = []
+        activityFlushWorkItem = nil
+
+        guard !batch.isEmpty else { return }
+
+        // Delete ALL of today's existing activity samples
+        let today = Calendar.current.startOfDay(for: Date())
+        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: today)!
         let descriptor = FetchDescriptor<StoredActivitySample>(
-            predicate: #Predicate<StoredActivitySample> { $0.timestamp == timestamp }
+            predicate: #Predicate<StoredActivitySample> { $0.timestamp >= today && $0.timestamp < tomorrow }
         )
-        let action: String
-        if let existing = (try? modelContext.fetch(descriptor))?.first {
-            existing.steps = steps
-            existing.distanceKm = distanceKm
-            existing.calories = calories
-            action = "UPDATE"
-        } else {
-            modelContext.insert(StoredActivitySample(timestamp: timestamp, steps: steps, distanceKm: distanceKm, calories: calories))
-            action = "INSERT"
+        let existing = (try? modelContext.fetch(descriptor)) ?? []
+        for sample in existing {
+            modelContext.delete(sample)
+        }
+        tLog("[AutoPersist] Activity flush: deleted \(existing.count) stale today-samples, inserting \(batch.count) fresh")
+
+        // Insert fresh samples
+        for entry in batch {
+            let timestamp = todayAt(hour: entry.hour, minute: entry.minute)
+            let distanceKm = Double(entry.distanceMeters) / 1000.0
+            modelContext.insert(StoredActivitySample(timestamp: timestamp, steps: entry.steps, distanceKm: distanceKm, calories: entry.calories))
         }
 
-        tLog("[AutoPersist] Activity save requested. action=\(action) ts=\(formatDate(timestamp)) steps=\(steps) kcal=\(calories) distKm=\(distanceKm)")
         if saveContext(tag: "Activity") {
-            Task { @MainActor in
-                await healthActivityWriter.writeActivitySample(timestamp: timestamp, steps: steps, calories: calories)
+            for entry in batch {
+                let timestamp = todayAt(hour: entry.hour, minute: entry.minute)
+                let distanceKm = Double(entry.distanceMeters) / 1000.0
+                Task { @MainActor in
+                    await healthActivityWriter.writeActivitySample(timestamp: timestamp, steps: entry.steps, calories: entry.calories)
+                }
+                influx.writeActivity(steps: entry.steps, calories: entry.calories, distanceKm: distanceKm, time: timestamp)
             }
-            influx.writeActivity(steps: steps, calories: calories, distanceKm: distanceKm, time: timestamp)
         }
     }
 
     private func todayAt(hour: Int, minute: Int) -> Date {
         let today = Calendar.current.startOfDay(for: Date())
-        return Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: today) ?? today
+        // Use explicit offset rather than date(bySettingHour:) which can produce
+        // unexpected results depending on the current time of day.
+        return today.addingTimeInterval(TimeInterval(hour * 3600 + minute * 60))
     }
 
     // MARK: - HRV / Stress split-series
