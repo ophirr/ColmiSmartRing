@@ -49,6 +49,18 @@ final class RingDataPersistenceCoordinator {
             let decoded = self.decodeBloodOxygenPayload(payload)
             tLog("[AutoPersist] Blood oxygen decoded \(decoded.count) valid points from \(payload.count) byte payload")
             self.persistBloodOxygenSeries(decoded)
+
+            // Populate home card with latest SpO2 from today's historical data
+            // so it shows immediately on connect (before the spot-check rotation reaches SpO2).
+            if self.ringSessionManager.realTimeBloodOxygenPercent == nil {
+                let todayStart = Calendar.current.startOfDay(for: Date())
+                if let latest = decoded.filter({ $0.time >= todayStart && $0.value > 0 && $0.value <= 100 })
+                    .max(by: { $0.time < $1.time }) {
+                    let pct = Int(latest.value)
+                    tLog("[AutoPersist] Seeding home SpO2 card with historical value: \(pct)%")
+                    self.ringSessionManager.realTimeBloodOxygenPercent = pct
+                }
+            }
         }
     }
 

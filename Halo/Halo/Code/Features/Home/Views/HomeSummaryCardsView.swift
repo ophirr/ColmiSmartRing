@@ -24,6 +24,10 @@ struct HomeSummaryCardsView: View {
     var distanceKm: Double
     var calories: Int
     var activityLabel: String
+    /// Latest SpO2 reading (nil if no data).
+    var spo2Percent: Int?
+    /// Latest temperature reading in Celsius (nil if no data).
+    var temperatureCelsius: Double?
 
     var body: some View {
         VStack(spacing: 12) {
@@ -31,6 +35,10 @@ struct HomeSummaryCardsView: View {
             HStack(spacing: 12) {
                 sleepCard
                 heartRateCard
+            }
+            HStack(spacing: 12) {
+                spo2Card
+                temperatureCard
             }
         }
         .padding(.vertical, 4)
@@ -133,6 +141,58 @@ struct HomeSummaryCardsView: View {
         .onTapGesture { onHeartRateTap?() }
     }
 
+    private var spo2Card: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("SpO2", systemImage: "lungs.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if let spo2 = spo2Percent {
+                Text("\(spo2)%")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.cyan)
+                    .contentTransition(.numericText())
+                    .animation(.easeInOut(duration: 0.3), value: spo2)
+                Text("latest")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else {
+                Text(L10n.HomeSummary.noData)
+                    .font(.subheadline)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var temperatureCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Temp", systemImage: "thermometer.medium")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if let celsius = temperatureCelsius {
+                Text(String(format: "%.1f°", celsius))
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .contentTransition(.numericText())
+                    .animation(.easeInOut(duration: 0.3), value: celsius)
+                Text("latest")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else {
+                Text(L10n.HomeSummary.noData)
+                    .font(.subheadline)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
     private func metricCell(value: String, unit: String, color: Color) -> some View {
         VStack(spacing: 4) {
             Text(value)
@@ -155,7 +215,9 @@ extension HomeSummaryCardsView {
     static func withPreviewActivity(
         sleepDurationMinutes: Int? = nil,
         heartRateAverage: Int? = nil,
-        currentBPM: Int? = nil
+        currentBPM: Int? = nil,
+        spo2Percent: Int? = nil,
+        temperatureCelsius: Double? = nil
     ) -> HomeSummaryCardsView {
         let activity = PreviewData.activitySummary
         return HomeSummaryCardsView(
@@ -165,7 +227,9 @@ extension HomeSummaryCardsView {
             steps: activity.steps,
             distanceKm: activity.distanceKm,
             calories: activity.calories,
-            activityLabel: activity.label
+            activityLabel: activity.label,
+            spo2Percent: spo2Percent,
+            temperatureCelsius: temperatureCelsius
         )
     }
 }

@@ -56,16 +56,10 @@ struct HomeScreenView: View {
                         steps: latestActivity?.steps ?? 0,
                         distanceKm: latestActivity?.distanceKm ?? 0,
                         calories: latestActivity?.calories ?? 0,
-                        activityLabel: latestActivity?.label ?? ""
+                        activityLabel: latestActivity?.label ?? "",
+                        spo2Percent: ringSessionManager.realTimeBloodOxygenPercent,
+                        temperatureCelsius: ringSessionManager.realTimeTemperatureCelsius
                     )
-                }
-                // TEMP: SpO2 test buttons
-                Section("SpO2 Test") {
-                    Button("Start SpO2") { ringSessionManager.startSpO2Streaming() }
-                    Button("Stop SpO2") { ringSessionManager.stopSpO2Streaming() }
-                    if let spo2 = ringSessionManager.realTimeBloodOxygenPercent {
-                        Text("SpO2: \(spo2)%").font(.title2.weight(.semibold)).foregroundStyle(.cyan)
-                    }
                 }
                 Section(L10n.Sleep.sectionTitle) {
                     if todaySleepSamples.isEmpty {

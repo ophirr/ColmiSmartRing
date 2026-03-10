@@ -46,6 +46,28 @@ enum RingTrackingSetting: CaseIterable {
     }
 }
 
+/// Unified PPG sensor state.  The ring has a single VC30F sensor shared by
+/// HR, SpO2, and temperature — only one measurement can run at a time.
+/// This enum replaces the scattered boolean flags that previously tracked
+/// which mode the sensor was in.
+enum SensorState: Equatable, CustomStringConvertible {
+    case idle
+    case spotCheck(RealTimeReading)   // brief measurement, auto-stops
+    case continuousHR                  // user-toggled from home screen
+    case spo2Stream                    // SpO2 with 2s continue keepalives
+    case workout                       // gym session owns the sensor
+
+    var description: String {
+        switch self {
+        case .idle: return "idle"
+        case .spotCheck(let type): return "spotCheck(\(type))"
+        case .continuousHR: return "continuousHR"
+        case .spo2Stream: return "spo2Stream"
+        case .workout: return "workout"
+        }
+    }
+}
+
 private let savedRingIdentifierKey = "savedRingIdentifier"
 private let savedRingDisplayNameKey = "savedRingDisplayName"
 private let preferredDataTimeZoneIdentifierKey = "preferredDataTimeZoneIdentifier"
@@ -57,10 +79,23 @@ class RingSessionManager: NSObject {
     var demoModeActive = false
     /// True when either a real ring is connected or demo mode is active.
     var isEffectivelyConnected: Bool { peripheralConnected || demoModeActive }
-    /// Set by GymSessionManager to prevent periodic sync from interrupting the real-time stream.
-    var isWorkoutActive = false
-    /// User-toggled continuous HR streaming from the home screen.
-    var isContinuousHRStreamActive = false
+    // MARK: - PPG Sensor State Machine
+
+    /// Unified PPG sensor state.  Only one measurement can run at a time.
+    private(set) var sensorState: SensorState = .idle
+
+    /// Backward-compatible computed properties — external consumers
+    /// (GymSessionManager, HomeScreenView, etc.) read these as before.
+    var isWorkoutActive: Bool { sensorState == .workout }
+    var isContinuousHRStreamActive: Bool { sensorState == .continuousHR }
+    var isSpO2StreamActive: Bool {
+        switch sensorState {
+        case .spo2Stream: return true
+        case .spotCheck(.spo2): return true
+        default: return false
+        }
+    }
+
     /// Latest real-time heart rate reading in bpm.
     var realTimeHeartRateBPM: Int?
     /// When the last command 105 heartRate packet arrived (including zeros).
@@ -87,8 +122,6 @@ class RingSessionManager: NSObject {
     var realTimeBloodOxygenPercent: Int?
     /// Timer that sends continue keepalives to keep the SpO2 measurement alive.
     private var spo2ContinueTimer: Timer?
-    /// True while SpO2 streaming is active.
-    var isSpO2StreamActive = false
     /// Latest real-time body temperature in °C (e.g. 36.3).
     var realTimeTemperatureCelsius: Double?
     /// Latest battery info reported by the ring.
@@ -152,16 +185,24 @@ class RingSessionManager: NSObject {
     private static let fullSyncEveryNPings: Int = 5
     /// Counter incremented on each keepalive; triggers full sync when it hits fullSyncEveryNPings.
     private var keepalivePingCount: Int = 0
+    /// Counts how many full-sync cycles have occurred; used to alternate
+    /// the 5th-ping slot between temperature and SpO2.
+    private var fullSyncCycleCount: Int = 0
 
     /// Periodic timer that re-syncs HR log (and other data) at the user's configured HR interval.
     /// Used as a foreground fallback; the BLE keepalive chain is the primary background driver.
     private var periodicSyncTimer: Timer?
 
-    /// When true, the next valid real-time reading triggers an InfluxDB write
-    /// and then auto-stops the stream.  Used for periodic spot-checks outside workouts.
-    private var spotCheckActive = false
-    /// Which reading type the current spot-check is measuring (HR or temperature).
-    private var spotCheckType: RealTimeReading = .realtimeHeartRate
+    /// True when a spot-check is in progress (derived from sensorState).
+    private var spotCheckActive: Bool {
+        if case .spotCheck = sensorState { return true }
+        return false
+    }
+    /// Which reading type the current spot-check is measuring (derived from sensorState).
+    private var spotCheckType: RealTimeReading {
+        if case .spotCheck(let type) = sensorState { return type }
+        return .realtimeHeartRate
+    }
     /// Auto-stop the spot-check after this timeout even if no valid reading arrives.
     private var spotCheckTimeoutTask: Task<Void, Never>?
     /// Last temperature reading received during the current spot-check (may be uncalibrated).
@@ -638,8 +679,10 @@ extension RingSessionManager: CBCentralManagerDelegate {
         uartTxCharacteristic = nil
         colmiWriteCharacteristic = nil
         colmiNotifyCharacteristic = nil
-        isContinuousHRStreamActive = false
-        spotCheckActive = false
+        // Reset sensor state directly (no BLE commands — connection is gone).
+        sensorState = .idle
+        spo2ContinueTimer?.invalidate()
+        spo2ContinueTimer = nil
         spotCheckTimeoutTask?.cancel()
         spotCheckTimeoutTask = nil
         awaitingKeepaliveBatteryResponse = false
@@ -805,8 +848,9 @@ extension RingSessionManager: CBPeripheralDelegate {
                     }
                     // Sanity-check: discard physiologically impossible values.
                     // 0xFF (255) is a known firmware artefact; valid resting-to-max
-                    // range is roughly 30-220 BPM.
-                    guard readingValue <= 220 else {
+                    // range is roughly 30-220 BPM.  Values like 1-2 bpm are sensor
+                    // noise during warmup — not real heart rates.
+                    guard readingValue >= 30 && readingValue <= 220 else {
                         tLog("[RealTime] Ignoring out-of-range HR: \(readingValue)")
                         break
                     }
@@ -815,18 +859,13 @@ extension RingSessionManager: CBPeripheralDelegate {
                     // Spot-check: got a valid reading — write to InfluxDB + Apple Health and stop.
                     if spotCheckActive && spotCheckType == .realtimeHeartRate {
                         tLog("[SpotCheck] Got HR \(readingValue) — writing to InfluxDB/HealthKit and stopping stream")
-                        spotCheckActive = false
-                        spotCheckTimeoutTask?.cancel()
-                        spotCheckTimeoutTask = nil
                         lastInfluxHRWrite = now
                         let bpm = Int(readingValue)
                         Task { @MainActor in
                             InfluxDBWriter.shared.writeHeartRates([(bpm: bpm, time: now)])
                             await self.healthHRWriter.writeHeartRate(bpm: bpm, time: now)
                         }
-                        stopRealTimeStreaming(type: .realtimeHeartRate)
-                        // Continue the keepalive chain now that the spot-check is done.
-                        scheduleNextKeepalive()
+                        finishSpotCheck()
                         break
                     }
 
@@ -840,6 +879,19 @@ extension RingSessionManager: CBPeripheralDelegate {
                     tLog("[SpO2] Response on 0x69 — value=\(readingValue) error=\(errorCode) pkt=\(packet.prefix(6).map { String(format: "%02x", $0) }.joined(separator: " "))")
                     guard readingValue > 0, readingValue <= 100 else { break }
                     realTimeBloodOxygenPercent = Int(readingValue)
+
+                    // Spot-check: got a valid SpO2 reading — write to InfluxDB/HealthKit and stop.
+                    if spotCheckActive && spotCheckType == .spo2 {
+                        tLog("[SpotCheck] Got SpO2 \(readingValue)% — writing to InfluxDB/HealthKit and stopping stream")
+                        lastInfluxSpO2Write = now
+                        let percent = Int(readingValue)
+                        Task { @MainActor in
+                            InfluxDBWriter.shared.writeSpO2(value: Double(percent), time: now)
+                            await self.healthHRWriter.writeSpO2(percent: percent, time: now)
+                        }
+                        finishSpotCheck()
+                        break
+                    }
 
                     if now.timeIntervalSince(lastInfluxSpO2Write) >= currentInfluxWriteInterval {
                         lastInfluxSpO2Write = now
@@ -1110,7 +1162,7 @@ extension RingSessionManager {
         // running.  Sending CMD_BATTERY mid-stream appears to disrupt the
         // PPG sensor pipeline on the R02 firmware, causing the stream to
         // die silently.  Skip the battery read and reschedule.
-        if isWorkoutActive || isContinuousHRStreamActive {
+        if sensorState == .workout || sensorState == .continuousHR {
             tLog("[Keepalive] Active stream — skipping battery read, rescheduling")
             scheduleNextKeepalive()
             return
@@ -1146,6 +1198,16 @@ extension RingSessionManager {
     /// Runs when the app has connected to the ring and discovered characteristics. Requests battery, sleep (Big Data), and heart rate log with staggered delays.
     func syncOnConnect() {
         tLog("Sync on connect: starting…")
+
+        // Kill any leftover real-time streams from a previous session.
+        // The ring may still be streaming SpO2/HR/temp if the app was
+        // backgrounded or disconnected without sending a stop command.
+        // Use raw BLE commands — the app state is already .idle from disconnect.
+        tLog("[SyncOnConnect] Sending stop commands to clear stale streams")
+        sendSpO2Stop()
+        sendRealTimeStop(type: .realtimeHeartRate)
+        sendRealTimeStop(type: .temperature)
+
         getBatteryStatus { _ in }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self else { return }
@@ -1213,21 +1275,23 @@ extension RingSessionManager {
 
         startPeriodicSync(intervalMinutes: savedInterval)
 
-        // Only start continuous real-time HR streaming if a workout is active.
-        // Outside workouts the ring's built-in HR logging (1-min interval) is
-        // sufficient, and the green LED flashing continuously is distracting
-        // (e.g. during sleep).
-        if isWorkoutActive {
-            tLog("[SyncOnConnect] Workout active — starting real-time HR stream")
-            startRealTimeStreaming(type: .realtimeHeartRate)
-        } else if isContinuousHRStreamActive {
-            tLog("[SyncOnConnect] Continuous stream was active — restarting")
-            startRealTimeStreaming(type: .realtimeHeartRate)
-        } else if !spotCheckActive {
+        // After connect, resume whatever sensor mode is appropriate.
+        // sensorState was reset to .idle on disconnect; if a workout or
+        // continuous stream was logically active, re-enter that mode.
+        if sensorState == .idle {
             tLog("[SyncOnConnect] Running spot-check for fresh InfluxDB reading")
             startSpotCheck()
         } else {
-            tLog("[SyncOnConnect] Spot-check already active — skipping")
+            tLog("[SyncOnConnect] Sensor already in \(sensorState) — skipping spot-check")
+        }
+
+        // Run a temperature spot-check shortly after the initial HR spot-check
+        // so the home card shows a fresh temperature reading on connect.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 35) { [weak self] in
+            guard let self, self.sensorState == .idle,
+                  self.realTimeTemperatureCelsius == nil else { return }
+            tLog("[SyncOnConnect] Running temperature spot-check")
+            self.startSpotCheck(type: .temperature)
         }
 
         // Start the keepalive chain now that the initial sync is done.
@@ -1259,14 +1323,14 @@ extension RingSessionManager {
     private func runPeriodicSync() {
         guard peripheralConnected, characteristicsDiscovered else { return }
 
-        if isWorkoutActive || isContinuousHRStreamActive {
+        if sensorState == .workout || sensorState == .continuousHR {
             tLog("[PeriodicSync] Active stream — skipping entirely")
             return
         }
 
         tLog("[PeriodicSync] Foreground fallback sync")
 
-        if !spotCheckActive {
+        if sensorState == .idle {
             startSpotCheck()
         }
 
@@ -1495,9 +1559,70 @@ extension RingSessionManager {
     }
 }
 
-// MARK: - RealTime Streaming
+// MARK: - PPG Sensor State Machine
 
 extension RingSessionManager {
+
+    // MARK: Transition
+
+    /// Centralized state transition.  Tears down the current sensor mode,
+    /// then sets up the new one.  All mutual-exclusion logic lives here.
+    private func transitionSensor(to newState: SensorState) {
+        let old = sensorState
+        guard old != newState else { return }
+
+        // --- Teardown current state ---
+        switch old {
+        case .idle:
+            break
+        case .spotCheck(let type):
+            spotCheckTimeoutTask?.cancel()
+            spotCheckTimeoutTask = nil
+            lastSpotCheckTempCelsius = nil
+            if type == .spo2 {
+                sendSpO2Stop()
+            } else {
+                sendRealTimeStop(type: type)
+            }
+        case .continuousHR:
+            sendRealTimeStop(type: .realtimeHeartRate)
+        case .spo2Stream:
+            spo2ContinueTimer?.invalidate()
+            spo2ContinueTimer = nil
+            sendSpO2Stop()
+        case .workout:
+            sendRealTimeStop(type: .realtimeHeartRate)
+        }
+
+        sensorState = newState
+
+        // --- Setup new state ---
+        switch newState {
+        case .idle:
+            break
+        case .spotCheck(let type):
+            lastSpotCheckTempCelsius = nil
+            if type == .spo2 {
+                sendSpO2Start()
+                startSpO2ContinueTimer()
+            } else {
+                sendRealTimeStart(type: type)
+            }
+            startSpotCheckTimeout(type: type)
+        case .continuousHR:
+            sendRealTimeStart(type: .realtimeHeartRate)
+        case .spo2Stream:
+            sendSpO2Start()
+            startSpO2ContinueTimer()
+        case .workout:
+            sendRealTimeStart(type: .realtimeHeartRate)
+        }
+
+        tLog("[Sensor] \(old) → \(newState)")
+    }
+
+    // MARK: Public API
+
     /// Send a command-30 "continue" keepalive to tell the ring to keep
     /// the PPG sensor running.  The Colmi protocol docs say the request
     /// type field is "only set to 3 in app".
@@ -1513,27 +1638,6 @@ extension RingSessionManager {
         }
     }
 
-    func startRealTimeStreaming(type: RealTimeReading) {
-        tLog("[RealTime] START \(type)")
-        sendRealTimeCommand(command: RingSessionManager.CMD_START_REAL_TIME, type: type, action: .start)
-    }
-
-    func continueRealTimeStreaming(type: RealTimeReading) {
-        tLog("[RealTime] CONTINUE \(type)")
-        sendRealTimeCommand(command: RingSessionManager.CMD_START_REAL_TIME, type: type, action: .continue)
-    }
-
-    func stopRealTimeStreaming(type: RealTimeReading) {
-        tLog("[RealTime] STOP \(type)")
-        realTimeHeartRateBPM = nil
-        spotCheckActive = false
-        spotCheckTimeoutTask?.cancel()
-        spotCheckTimeoutTask = nil
-        sendRealTimeCommand(command: RingSessionManager.CMD_STOP_REAL_TIME, type: type, action: nil)
-    }
-
-    /// Start a brief real-time HR measurement.  The stream auto-stops as soon as
-    /// the first valid (non-zero, ≤220) HR packet arrives, or after 15 s timeout.
     /// Toggle continuous real-time HR streaming from the home screen.
     func toggleContinuousHRStream() {
         guard !isWorkoutActive else {
@@ -1541,37 +1645,144 @@ extension RingSessionManager {
             return
         }
         if isContinuousHRStreamActive {
-            tLog("[ContinuousHR] Stopping continuous stream")
-            isContinuousHRStreamActive = false
-            stopRealTimeStreaming(type: .realtimeHeartRate)
+            transitionSensor(to: .idle)
         } else {
-            tLog("[ContinuousHR] Starting continuous stream")
-            isContinuousHRStreamActive = true
-            startRealTimeStreaming(type: .realtimeHeartRate)
+            transitionSensor(to: .continuousHR)
         }
     }
 
-    private func startSpotCheck(type: RealTimeReading = .realtimeHeartRate) {
-        guard !isWorkoutActive, !isContinuousHRStreamActive else { return }
-        tLog("[SpotCheck] Starting brief \(type) spot-check")
-        spotCheckActive = true
-        spotCheckType = type
-        lastSpotCheckTempCelsius = nil
-        startRealTimeStreaming(type: type)
+    /// Start continuous SpO2 streaming (with 2s continue keepalives).
+    func startSpO2Streaming() {
+        transitionSensor(to: .spo2Stream)
+    }
 
-        // Safety timeout — temperature needs ~16s to measure, HR is faster.
-        let timeoutSeconds: UInt64 = (type == .temperature) ? 20 : 15
+    /// Stop SpO2 streaming.
+    func stopSpO2Streaming() {
+        if isSpO2StreamActive {
+            transitionSensor(to: .idle)
+        }
+    }
+
+    /// Start a real-time stream (used by GymSessionManager watchdog restart).
+    func startRealTimeStreaming(type: RealTimeReading) {
+        tLog("[RealTime] START \(type)")
+        sendRealTimeStart(type: type)
+    }
+
+    func continueRealTimeStreaming(type: RealTimeReading) {
+        tLog("[RealTime] CONTINUE \(type)")
+        sendRealTimeCommand(command: RingSessionManager.CMD_START_REAL_TIME, type: type, action: .continue)
+    }
+
+    /// Stop a real-time stream.  Called by GymSessionManager on workout end
+    /// and by the spot-check completion path.
+    func stopRealTimeStreaming(type: RealTimeReading) {
+        tLog("[RealTime] STOP \(type)")
+        realTimeHeartRateBPM = nil
+        sendRealTimeStop(type: type)
+    }
+
+    /// Enter workout mode.  Called by GymSessionManager.startWorkout().
+    func enterWorkoutMode() {
+        transitionSensor(to: .workout)
+    }
+
+    /// Exit workout mode.  Called by GymSessionManager.stopWorkout().
+    func exitWorkoutMode() {
+        if isWorkoutActive {
+            transitionSensor(to: .idle)
+        }
+    }
+
+    /// Start a brief spot-check measurement.  The stream auto-stops when
+    /// the first valid reading arrives, or after a safety timeout.
+    func startSpotCheck(type: RealTimeReading = .realtimeHeartRate) {
+        guard sensorState == .idle else {
+            tLog("[SpotCheck] Skipping \(type) — sensor busy (\(sensorState))")
+            scheduleNextKeepalive()
+            return
+        }
+        transitionSensor(to: .spotCheck(type))
+    }
+
+    /// Called by the spot-check packet handler when a valid reading arrives.
+    /// Transitions back to idle and resumes the keepalive chain.
+    func finishSpotCheck() {
+        guard spotCheckActive else { return }
+        spotCheckTimeoutTask?.cancel()
+        spotCheckTimeoutTask = nil
+        let wasType = spotCheckType
+        // Teardown via transition, but avoid sending a redundant stop for
+        // the stream we already got a final reading from.  The transition
+        // teardown will handle the BLE stop command.
+        sensorState = .idle
+        if wasType == .spo2 {
+            spo2ContinueTimer?.invalidate()
+            spo2ContinueTimer = nil
+            sendSpO2Stop()
+        } else {
+            sendRealTimeStop(type: wasType)
+        }
+        tLog("[Sensor] spotCheck(\(wasType)) → idle (spot-check finished)")
+        scheduleNextKeepalive()
+    }
+
+    // MARK: Raw BLE command helpers
+
+    /// Send a 0x69 start command (does NOT update sensorState).
+    private func sendRealTimeStart(type: RealTimeReading) {
+        sendRealTimeCommand(command: RingSessionManager.CMD_START_REAL_TIME, type: type, action: .start)
+    }
+
+    /// Send a 0x6A stop command (does NOT update sensorState).
+    private func sendRealTimeStop(type: RealTimeReading) {
+        sendRealTimeCommand(command: RingSessionManager.CMD_STOP_REAL_TIME, type: type, action: nil)
+    }
+
+    /// Send an SpO2 start via 0x69 (does NOT update sensorState).
+    private func sendSpO2Start() {
+        tLog("[SpO2] START — sending 0x69 DataType=3 Action=Start")
+        sendSpO2Packet(payload: [RealTimeReading.spo2.rawValue, Action.start.rawValue])
+    }
+
+    /// Send an SpO2 stop via 0x6A (does NOT update sensorState).
+    private func sendSpO2Stop() {
+        tLog("[SpO2] STOP")
+        guard let uartRxCharacteristic, let peripheral else { return }
+        do {
+            let packet = try makePacket(command: Self.CMD_STOP_REAL_TIME, subData: [RealTimeReading.spo2.rawValue])
+            let hex = packet.map { String(format: "%02x", $0) }.joined(separator: " ")
+            tLog("[SpO2] Stop packet (0x6A): \(hex)")
+            peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
+        } catch {
+            tLog("[SpO2] Stop packet failed: \(error)")
+        }
+    }
+
+    /// Start the SpO2 2-second continue keepalive timer.
+    private func startSpO2ContinueTimer() {
+        spo2ContinueTimer?.invalidate()
+        spo2ContinueTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self, self.isSpO2StreamActive else { return }
+            self.sendSpO2Continue()
+        }
+    }
+
+    /// Start the spot-check safety timeout.
+    private func startSpotCheckTimeout(type: RealTimeReading) {
+        let timeoutSeconds: UInt64
+        switch type {
+        case .spo2:         timeoutSeconds = 50
+        case .temperature:  timeoutSeconds = 20
+        default:            timeoutSeconds = 30
+        }
         spotCheckTimeoutTask?.cancel()
         spotCheckTimeoutTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
             guard let self, !Task.isCancelled, self.spotCheckActive else { return }
-            self.spotCheckActive = false
-            self.stopRealTimeStreaming(type: type)
 
             // For temperature, write the last received reading if it looks
-            // like a valid body temp. The ring often only produces the
-            // calibrated value in its final packet (which may arrive a few
-            // ms after the stop command).
+            // like a valid body temp.
             if type == .temperature, let celsius = self.lastSpotCheckTempCelsius {
                 if celsius >= 30.0 && celsius <= 42.0 {
                     tLog("[SpotCheck] Temp timeout — writing last valid reading: \(String(format: "%.1f", celsius))°C")
@@ -1585,65 +1796,36 @@ extension RingSessionManager {
                     tLog("[SpotCheck] Temp timeout — last reading \(String(format: "%.1f", celsius))°C out of body range, discarding")
                 }
                 self.lastSpotCheckTempCelsius = nil
+            } else if type == .spo2 {
+                tLog("[SpotCheck] SpO2 timeout — no valid reading received in \(timeoutSeconds)s")
             } else {
                 tLog("[SpotCheck] Timeout — stopping \(type) stream without a valid reading")
             }
 
+            self.transitionSensor(to: .idle)
             self.scheduleNextKeepalive()
         }
     }
-    
+
     private func sendRealTimeCommand(command: UInt8, type: RealTimeReading, action: Action?) {
         guard let uartRxCharacteristic, let peripheral else {
             tLog("Cannot send real-time command. Peripheral or characteristic not ready.")
             return
         }
-        
+
         var packetData: [UInt8] = [type.rawValue]
         if let action = action {
             packetData.append(action.rawValue)
         } else {
             packetData.append(contentsOf: [0, 0])
         }
-        
+
         do {
             let packet = try makePacket(command: command, subData: packetData)
             let data = Data(packet)
             peripheral.writeValue(data, for: uartRxCharacteristic, type: .withResponse)
         } catch {
             tLog("Failed to create packet: \(error)")
-        }
-    }
-    // MARK: - SpO2 Streaming via 0x69
-
-    func startSpO2Streaming() {
-        tLog("[SpO2] START — sending 0x69 DataType=3 Action=Start")
-        isSpO2StreamActive = true
-        sendSpO2Packet(payload: [RealTimeReading.spo2.rawValue, Action.start.rawValue])
-
-        // Start a 2-second continue keepalive timer
-        spo2ContinueTimer?.invalidate()
-        spo2ContinueTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self, self.isSpO2StreamActive else { return }
-            self.sendSpO2Continue()
-        }
-    }
-
-    func stopSpO2Streaming() {
-        tLog("[SpO2] STOP")
-        isSpO2StreamActive = false
-        spo2ContinueTimer?.invalidate()
-        spo2ContinueTimer = nil
-        // Send stop via 0x6A (same mechanism HR uses to stop — CMD_STOP_REAL_TIME)
-        // with DataType=3 (SpO2) in byte[1].
-        guard let uartRxCharacteristic, let peripheral else { return }
-        do {
-            let packet = try makePacket(command: Self.CMD_STOP_REAL_TIME, subData: [RealTimeReading.spo2.rawValue])
-            let hex = packet.map { String(format: "%02x", $0) }.joined(separator: " ")
-            tLog("[SpO2] Stop packet (0x6A): \(hex)")
-            peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
-        } catch {
-            tLog("[SpO2] Stop packet failed: \(error)")
         }
     }
 
@@ -1726,22 +1908,28 @@ extension RingSessionManager {
 
         keepalivePingCount += 1
 
-        // HR spot-check on every ping (~1 min); temperature every 5th (~5 min).
-        if !isWorkoutActive && !isContinuousHRStreamActive && !spotCheckActive {
-            let type: RealTimeReading = (keepalivePingCount % 5 == 0) ? .temperature : .realtimeHeartRate
+        // Spot-check rotation: only start when sensor is idle.
+        // Every 3rd ping alternates between temperature and SpO2 (~6 min each);
+        // other pings do HR.
+        if sensorState == .idle {
+            let type: RealTimeReading
+            if keepalivePingCount % 3 == 0 && keepalivePingCount > 0 {
+                type = (keepalivePingCount / 3) % 2 == 0 ? .temperature : .spo2
+            } else {
+                type = .realtimeHeartRate
+            }
             startSpotCheck(type: type)
             // Don't schedule next keepalive now — it will be scheduled when
-            // the spot-check finishes (or times out).  This prevents piling
-            // up battery pings while the PPG sensor is still measuring.
+            // the spot-check finishes (or times out).
         } else {
-            // Stream active or another spot-check in progress — just reschedule.
             scheduleNextKeepalive()
         }
 
         // Full data sync (HR log, HRV, SpO2, etc.) every N pings.
         if keepalivePingCount >= Self.fullSyncEveryNPings {
             keepalivePingCount = 0
-            if !isWorkoutActive && !isContinuousHRStreamActive {
+            fullSyncCycleCount += 1
+            if sensorState == .idle || spotCheckActive {
                 tLog("[Keepalive] Full sync triggered (every \(Self.fullSyncEveryNPings) pings)")
                 // Stagger syncs so commands don't pile up on the ring.
                 // Start after 20 s — gives the spot-check time to finish first.

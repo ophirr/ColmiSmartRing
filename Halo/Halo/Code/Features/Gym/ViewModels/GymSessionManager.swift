@@ -156,14 +156,10 @@ class GymSessionManager {
         // Clear stale HR so the warmup indicator shows until the ring locks on fresh data.
         ringManager?.realTimeHeartRateBPM = nil
 
-        // Tell RingSessionManager a workout is active so periodic sync won't
-        // flood the BLE channel with data requests and kill the real-time stream.
-        ringManager?.isWorkoutActive = true
-
-        // Use DataType=6 (realtimeHeartRate) for workouts.  Responses arrive
-        // on command 30 instead of 105.  This may give us continuous PPG
-        // measurement instead of the brief ~5 s spot-check that DataType=1 does.
-        ringManager?.startRealTimeStreaming(type: .realtimeHeartRate)
+        // Tell RingSessionManager to enter workout mode — this transitions the
+        // sensor state, stops any active spot-check/stream, and starts the
+        // real-time HR stream for the workout.
+        ringManager?.enterWorkoutMode()
 
         // Start timer loop
         timerTask = Task { [weak self] in
@@ -213,13 +209,12 @@ class GymSessionManager {
         continueTask = nil
         workoutState = .finished
 
-        // Explicitly stop the real-time HR stream so the ring turns off
-        // the green LED immediately instead of waiting for firmware timeout (~60 s).
-        ringManager?.stopRealTimeStreaming(type: .realtimeHeartRate)
+        // Exit workout mode — stops the real-time HR stream and returns
+        // the sensor to idle so periodic spot-checks resume.
+        ringManager?.exitWorkoutMode()
 
-        // Clear activity tag and workout flag so periodic sync resumes normally
+        // Clear activity tag so periodic sync resumes normally
         InfluxDBWriter.shared.activeTag = .none
-        ringManager?.isWorkoutActive = false
 
         if hapticsEnabled {
             hapticNotification.notificationOccurred(.warning)
