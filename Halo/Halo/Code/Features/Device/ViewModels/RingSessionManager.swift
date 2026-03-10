@@ -555,6 +555,7 @@ class RingSessionManager: NSObject {
         }
         if peripheral.state == .connected {
             tLog("[Connect] Already connected — discovering services")
+            peripheralConnected = true
             peripheral.discoverServices(nil)
             return
         }
@@ -894,17 +895,18 @@ extension RingSessionManager: CBPeripheralDelegate {
                         tLog("[RealTime] Ignoring out-of-range HR: \(readingValue)")
                         break
                     }
-                    realTimeHeartRateBPM = Int(readingValue)
 
                     // Spot-check: collect readings — don't stop early.
                     // The VC30F PPG sensor's first readings after a cold start
                     // are often elevated (warmup artefact).  We let the full
-                    // 30s timeout run and take the median at the end.
+                    // timeout run and take the median at the end.
                     if spotCheckActive && spotCheckType == .realtimeHeartRate {
                         spotCheckHRReadings.append(Int(readingValue))
                         tLog("[SpotCheck] HR sample \(spotCheckHRReadings.count): \(readingValue) bpm")
                         break
                     }
+
+                    realTimeHeartRateBPM = Int(readingValue)
 
                     if now.timeIntervalSince(lastInfluxHRWrite) >= currentInfluxWriteInterval {
                         lastInfluxHRWrite = now
@@ -959,8 +961,8 @@ extension RingSessionManager: CBPeripheralDelegate {
                     spotCheckTempReadings.append(celsius)
 
                     // For non-spot-check continuous streaming, only surface
-                    // calibrated values (35-42°C) to the UI / InfluxDB.
-                    guard celsius >= 35.0 && celsius <= 42.0 else { break }
+                    // calibrated values (35-38°C) to the UI / InfluxDB.
+                    guard celsius >= 35.0 && celsius <= 38.0 else { break }
                     realTimeTemperatureCelsius = celsius
 
                     // During a spot-check, do NOT stop early — let the full
@@ -1402,6 +1404,15 @@ extension RingSessionManager {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
             self?.syncActivityData(dayOffset: 0)
+        }
+
+        // Re-check HR log settings — the ring firmware resets them on its own
+        // midnight reboot, so we need to periodically re-apply.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.ensureHRLogSettings()
+            }
         }
     }
 }
@@ -1856,7 +1867,7 @@ extension RingSessionManager {
                 // Take latter half, then filter to body range
                 let halfIndex = allReadings.count / 2
                 let settled = Array(allReadings.suffix(from: halfIndex))
-                let inRange = settled.filter { $0 >= 35.0 && $0 <= 42.0 }
+                let inRange = settled.filter { $0 >= 35.0 && $0 <= 38.0 }
 
                 if inRange.isEmpty {
                     let lastStr = allReadings.last.map { String(format: "%.1f", $0) } ?? "none"
@@ -2052,6 +2063,14 @@ extension RingSessionManager {
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 28) { [weak self] in
                     self?.syncActivityData(dayOffset: 0)
+                }
+                // Re-check HR log settings — the ring firmware resets them
+                // on its own midnight reboot cycle.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+                    guard let self else { return }
+                    Task { @MainActor in
+                        await self.ensureHRLogSettings()
+                    }
                 }
             }
         }
