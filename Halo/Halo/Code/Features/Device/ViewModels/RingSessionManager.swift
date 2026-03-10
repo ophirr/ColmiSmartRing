@@ -184,9 +184,9 @@ class RingSessionManager: NSObject {
     /// With a 60 s keepalive, 5 = full sync every ~5 minutes.
     private static let fullSyncEveryNPings: Int = 5
     /// Counter incremented on each keepalive; triggers full sync when it hits fullSyncEveryNPings.
+    /// Spot-check rotation: SpO2 every 10th ping (~10 min, 60s window), temperature every 3rd, rest HR.
     private var keepalivePingCount: Int = 0
-    /// Counts how many full-sync cycles have occurred; used to alternate
-    /// the 5th-ping slot between temperature and SpO2.
+    /// Counts how many full-sync cycles have occurred.
     private var fullSyncCycleCount: Int = 0
 
     /// Periodic timer that re-syncs HR log (and other data) at the user's configured HR interval.
@@ -205,8 +205,10 @@ class RingSessionManager: NSObject {
     }
     /// Auto-stop the spot-check after this timeout even if no valid reading arrives.
     private var spotCheckTimeoutTask: Task<Void, Never>?
-    /// Last temperature reading received during the current spot-check (may be uncalibrated).
-    private var lastSpotCheckTempCelsius: Double?
+    /// All temperature readings received during the current spot-check.
+    /// The timeout handler picks the median of body-range values (35-42°C)
+    /// rather than trusting a single noisy sample.
+    private var spotCheckTempReadings: [Double] = []
 
     /// True while we're waiting for a battery response that was sent by the
     /// keepalive chain.  Prevents `handleBatteryResponse` from driving the
@@ -440,8 +442,20 @@ class RingSessionManager: NSObject {
             tLog("[Connect] ⚠️ Manager not powered on, aborting")
             return
         }
-        if p.state == .connected || p.state == .connecting {
-            tLog("[Connect] ⚠️ Already connected/connecting, skipping")
+        if p.state == .connected {
+            tLog("[Connect] Already connected — setting up")
+            stopDiscovery()
+            p.delegate = self
+            peripheral = p
+            p.discoverServices(nil)
+            return
+        }
+        if p.state == .connecting {
+            tLog("[Connect] Stuck in .connecting — cancelling and retrying")
+            manager.cancelPeripheralConnection(p)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.connectAndSaveRing(peripheral: p)
+            }
             return
         }
         stopDiscovery()
@@ -518,6 +532,27 @@ class RingSessionManager: NSObject {
 
     func connect() {
         guard manager.state == .poweredOn, let peripheral else { return }
+        // If the peripheral is stuck in .connecting (e.g. restored from a killed session),
+        // cancel it first so CoreBluetooth starts fresh.
+        if peripheral.state == .connecting {
+            tLog("[Connect] Peripheral stuck in .connecting — cancelling first")
+            manager.cancelPeripheralConnection(peripheral)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, let p = self.peripheral, self.manager.state == .poweredOn else { return }
+                tLog("[Connect] Re-connecting after cancel")
+                self.manager.connect(p, options: [
+                    CBConnectPeripheralOptionNotifyOnConnectionKey: true,
+                    CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
+                    CBConnectPeripheralOptionStartDelayKey: 1
+                ])
+            }
+            return
+        }
+        if peripheral.state == .connected {
+            tLog("[Connect] Already connected — discovering services")
+            peripheral.discoverServices(nil)
+            return
+        }
         manager.connect(peripheral, options: [
             CBConnectPeripheralOptionNotifyOnConnectionKey: true,
             CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
@@ -917,13 +952,13 @@ extension RingSessionManager: CBPeripheralDelegate {
                     let celsius = Double(rawTemp) / 20.0
                     tLog("[RealTime] Temp raw=\(rawTemp) → \(String(format: "%.1f", celsius))°C")
 
-                    // Always stash the latest reading (even if out of range)
-                    // so the timeout handler can decide what to do with it.
-                    lastSpotCheckTempCelsius = celsius
+                    // Stash every reading so the timeout handler can pick
+                    // the median of body-range values.
+                    spotCheckTempReadings.append(celsius)
 
                     // For non-spot-check continuous streaming, only surface
-                    // calibrated values (30-42°C) to the UI / InfluxDB.
-                    guard celsius >= 30.0 && celsius <= 42.0 else { break }
+                    // calibrated values (35-42°C) to the UI / InfluxDB.
+                    guard celsius >= 35.0 && celsius <= 42.0 else { break }
                     realTimeTemperatureCelsius = celsius
 
                     // During a spot-check, do NOT stop early — let the full
@@ -1273,22 +1308,41 @@ extension RingSessionManager {
             }
         }
 
+        // Ensure autonomous blood oxygen monitoring is enabled on the ring.
+        do {
+            let spo2Enabled = try await readTrackingSetting(.bloodOxygen)
+            if !spo2Enabled {
+                tLog("[SyncOnConnect] Blood oxygen tracking disabled — enabling")
+                try await writeTrackingSetting(.bloodOxygen, enabled: true)
+                tLog("[SyncOnConnect] Blood oxygen tracking enabled")
+            } else {
+                tLog("[SyncOnConnect] Blood oxygen tracking already enabled")
+            }
+        } catch {
+            tLog("[SyncOnConnect] Blood oxygen tracking check failed: \(error)")
+        }
+
         startPeriodicSync(intervalMinutes: savedInterval)
 
-        // After connect, resume whatever sensor mode is appropriate.
-        // sensorState was reset to .idle on disconnect; if a workout or
-        // continuous stream was logically active, re-enter that mode.
+        // After connect, start with SpO2 spot-check first (60s window),
+        // then HR, then temperature — so we can verify real-time SpO2 works.
         if sensorState == .idle {
-            tLog("[SyncOnConnect] Running spot-check for fresh InfluxDB reading")
-            startSpotCheck()
+            tLog("[SyncOnConnect] Running SpO2 spot-check (60s window)")
+            startSpotCheck(type: .spo2)
         } else {
             tLog("[SyncOnConnect] Sensor already in \(sensorState) — skipping spot-check")
         }
 
-        // Run a temperature spot-check shortly after the initial HR spot-check
-        // so the home card shows a fresh temperature reading on connect.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 35) { [weak self] in
-            guard let self, self.sensorState == .idle,
+        // After SpO2 finishes (up to 60s), run HR spot-check for fresh reading.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 65) { [weak self] in
+            guard let self, self.peripheralConnected, self.sensorState == .idle else { return }
+            tLog("[SyncOnConnect] Running HR spot-check")
+            self.startSpotCheck(type: .realtimeHeartRate)
+        }
+
+        // Then temperature spot-check after HR.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 100) { [weak self] in
+            guard let self, self.peripheralConnected, self.sensorState == .idle,
                   self.realTimeTemperatureCelsius == nil else { return }
             tLog("[SyncOnConnect] Running temperature spot-check")
             self.startSpotCheck(type: .temperature)
@@ -1578,7 +1632,7 @@ extension RingSessionManager {
         case .spotCheck(let type):
             spotCheckTimeoutTask?.cancel()
             spotCheckTimeoutTask = nil
-            lastSpotCheckTempCelsius = nil
+            spotCheckTempReadings.removeAll()
             if type == .spo2 {
                 sendSpO2Stop()
             } else {
@@ -1601,7 +1655,7 @@ extension RingSessionManager {
         case .idle:
             break
         case .spotCheck(let type):
-            lastSpotCheckTempCelsius = nil
+            spotCheckTempReadings.removeAll()
             if type == .spo2 {
                 sendSpO2Start()
                 startSpO2ContinueTimer()
@@ -1772,7 +1826,7 @@ extension RingSessionManager {
     private func startSpotCheckTimeout(type: RealTimeReading) {
         let timeoutSeconds: UInt64
         switch type {
-        case .spo2:         timeoutSeconds = 50
+        case .spo2:         timeoutSeconds = 60
         case .temperature:  timeoutSeconds = 20
         default:            timeoutSeconds = 30
         }
@@ -1781,21 +1835,31 @@ extension RingSessionManager {
             try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
             guard let self, !Task.isCancelled, self.spotCheckActive else { return }
 
-            // For temperature, write the last received reading if it looks
-            // like a valid body temp.
-            if type == .temperature, let celsius = self.lastSpotCheckTempCelsius {
-                if celsius >= 30.0 && celsius <= 42.0 {
-                    tLog("[SpotCheck] Temp timeout — writing last valid reading: \(String(format: "%.1f", celsius))°C")
+            // For temperature, pick the median of body-range readings
+            // (35-42°C).  The ring's VC30F sensor is extremely noisy —
+            // individual samples can swing 5-10°C — so a single reading
+            // (first, last, or arbitrary) is unreliable.  The median of
+            // the in-range subset is far more stable.
+            if type == .temperature {
+                let inRange = self.spotCheckTempReadings.filter { $0 >= 35.0 && $0 <= 42.0 }
+                let allReadings = self.spotCheckTempReadings
+                self.spotCheckTempReadings.removeAll()
+
+                if inRange.isEmpty {
+                    let lastStr = allReadings.last.map { String(format: "%.1f", $0) } ?? "none"
+                    tLog("[SpotCheck] Temp timeout — 0/\(allReadings.count) readings in body range (last: \(lastStr)°C), discarding")
+                } else {
+                    let sorted = inRange.sorted()
+                    let median = sorted[sorted.count / 2]
+                    tLog("[SpotCheck] Temp timeout — median \(String(format: "%.1f", median))°C from \(inRange.count)/\(allReadings.count) in-range readings")
                     let now = Date()
                     self.lastInfluxTempWrite = now
+                    self.realTimeTemperatureCelsius = median
                     Task { @MainActor in
-                        InfluxDBWriter.shared.writeTemperature(celsius: celsius, time: now)
-                        await self.healthHRWriter.writeTemperature(celsius: celsius, time: now)
+                        InfluxDBWriter.shared.writeTemperature(celsius: median, time: now)
+                        await self.healthHRWriter.writeTemperature(celsius: median, time: now)
                     }
-                } else {
-                    tLog("[SpotCheck] Temp timeout — last reading \(String(format: "%.1f", celsius))°C out of body range, discarding")
                 }
-                self.lastSpotCheckTempCelsius = nil
             } else if type == .spo2 {
                 tLog("[SpotCheck] SpO2 timeout — no valid reading received in \(timeoutSeconds)s")
             } else {
@@ -1909,12 +1973,14 @@ extension RingSessionManager {
         keepalivePingCount += 1
 
         // Spot-check rotation: only start when sensor is idle.
-        // Every 3rd ping alternates between temperature and SpO2 (~6 min each);
-        // other pings do HR.
+        // SpO2 every 10th ping (~10 min) with a 60s window; temperature every
+        // 3rd non-SpO2 ping; everything else is HR.
         if sensorState == .idle {
             let type: RealTimeReading
-            if keepalivePingCount % 3 == 0 && keepalivePingCount > 0 {
-                type = (keepalivePingCount / 3) % 2 == 0 ? .temperature : .spo2
+            if keepalivePingCount % 10 == 0 && keepalivePingCount > 0 {
+                type = .spo2
+            } else if keepalivePingCount % 3 == 0 && keepalivePingCount > 0 {
+                type = .temperature
             } else {
                 type = .realtimeHeartRate
             }
