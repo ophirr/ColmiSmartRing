@@ -13,7 +13,7 @@ struct SPO2SectionView: View {
     var body: some View {
         Section(L10n.SPO2.sectionTitle) {
             Button {
-                ringSessionManager.startRealTimeStreaming(type: .spo2)
+                ringSessionManager.startSpO2Streaming()
             } label: {
                 Text(L10n.SPO2.streamingStart)
                     .frame(maxWidth: .infinity)
@@ -39,7 +39,7 @@ struct SPO2SectionView: View {
             .accessibilityLabel(L10n.A11y.spo2Continue)
 
             Button {
-                ringSessionManager.stopRealTimeStreaming(type: .spo2)
+                ringSessionManager.stopSpO2Streaming()
             } label: {
                 Text(L10n.SPO2.streamingStop)
                     .frame(maxWidth: .infinity)
