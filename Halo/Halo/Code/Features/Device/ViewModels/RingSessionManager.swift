@@ -209,6 +209,11 @@ class RingSessionManager: NSObject {
     /// The timeout handler picks the median of body-range values (35-42°C)
     /// rather than trusting a single noisy sample.
     private var spotCheckTempReadings: [Double] = []
+    /// All HR readings received during the current HR spot-check.
+    /// The VC30F PPG sensor's first readings after a cold start are often
+    /// elevated (warmup artefact).  We collect for the full timeout period
+    /// and write the median to InfluxDB instead of trusting the first value.
+    private var spotCheckHRReadings: [Int] = []
 
     /// True while we're waiting for a battery response that was sent by the
     /// keepalive chain.  Prevents `handleBatteryResponse` from driving the
@@ -891,16 +896,13 @@ extension RingSessionManager: CBPeripheralDelegate {
                     }
                     realTimeHeartRateBPM = Int(readingValue)
 
-                    // Spot-check: got a valid reading — write to InfluxDB + Apple Health and stop.
+                    // Spot-check: collect readings — don't stop early.
+                    // The VC30F PPG sensor's first readings after a cold start
+                    // are often elevated (warmup artefact).  We let the full
+                    // 30s timeout run and take the median at the end.
                     if spotCheckActive && spotCheckType == .realtimeHeartRate {
-                        tLog("[SpotCheck] Got HR \(readingValue) — writing to InfluxDB/HealthKit and stopping stream")
-                        lastInfluxHRWrite = now
-                        let bpm = Int(readingValue)
-                        Task { @MainActor in
-                            InfluxDBWriter.shared.writeHeartRates([(bpm: bpm, time: now)])
-                            await self.healthHRWriter.writeHeartRate(bpm: bpm, time: now)
-                        }
-                        finishSpotCheck()
+                        spotCheckHRReadings.append(Int(readingValue))
+                        tLog("[SpotCheck] HR sample \(spotCheckHRReadings.count): \(readingValue) bpm")
                         break
                     }
 
@@ -1633,6 +1635,7 @@ extension RingSessionManager {
             spotCheckTimeoutTask?.cancel()
             spotCheckTimeoutTask = nil
             spotCheckTempReadings.removeAll()
+            spotCheckHRReadings.removeAll()
             if type == .spo2 {
                 sendSpO2Stop()
             } else {
@@ -1656,6 +1659,7 @@ extension RingSessionManager {
             break
         case .spotCheck(let type):
             spotCheckTempReadings.removeAll()
+            spotCheckHRReadings.removeAll()
             if type == .spo2 {
                 sendSpO2Start()
                 startSpO2ContinueTimer()
@@ -1828,6 +1832,10 @@ extension RingSessionManager {
         switch type {
         case .spo2:         timeoutSeconds = 60
         case .temperature:  timeoutSeconds = 20
+        case .realtimeHeartRate, .heartRate:
+            // The VC30F PPG needs 45-60s to settle from warmup.
+            // With median-based collection, longer = more accurate.
+            timeoutSeconds = 60
         default:            timeoutSeconds = 30
         }
         spotCheckTimeoutTask?.cancel()
@@ -1835,29 +1843,60 @@ extension RingSessionManager {
             try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
             guard let self, !Task.isCancelled, self.spotCheckActive else { return }
 
-            // For temperature, pick the median of body-range readings
-            // (35-42°C).  The ring's VC30F sensor is extremely noisy —
-            // individual samples can swing 5-10°C — so a single reading
-            // (first, last, or arbitrary) is unreliable.  The median of
-            // the in-range subset is far more stable.
+            // VC30F PPG ground truth: the sensor needs warmup time
+            // after every cold start.  Early readings are artefacts.
+            // For ALL sensor types we discard the first half of samples
+            // and take the median of the settled (latter) half.
+            //
+            // Temperature additionally filters to body range (35-42°C)
+            // because the raw sensor swings wildly (27-57°C).
             if type == .temperature {
-                let inRange = self.spotCheckTempReadings.filter { $0 >= 35.0 && $0 <= 42.0 }
                 let allReadings = self.spotCheckTempReadings
                 self.spotCheckTempReadings.removeAll()
+                // Take latter half, then filter to body range
+                let halfIndex = allReadings.count / 2
+                let settled = Array(allReadings.suffix(from: halfIndex))
+                let inRange = settled.filter { $0 >= 35.0 && $0 <= 42.0 }
 
                 if inRange.isEmpty {
                     let lastStr = allReadings.last.map { String(format: "%.1f", $0) } ?? "none"
-                    tLog("[SpotCheck] Temp timeout — 0/\(allReadings.count) readings in body range (last: \(lastStr)°C), discarding")
+                    tLog("[SpotCheck] Temp timeout — 0 in-range from last \(settled.count)/\(allReadings.count) readings (last: \(lastStr)°C), discarding")
                 } else {
                     let sorted = inRange.sorted()
                     let median = sorted[sorted.count / 2]
-                    tLog("[SpotCheck] Temp timeout — median \(String(format: "%.1f", median))°C from \(inRange.count)/\(allReadings.count) in-range readings")
+                    tLog("[SpotCheck] Temp timeout — median \(String(format: "%.1f", median))°C from \(inRange.count) in-range of last \(settled.count)/\(allReadings.count) readings")
                     let now = Date()
                     self.lastInfluxTempWrite = now
                     self.realTimeTemperatureCelsius = median
                     Task { @MainActor in
                         InfluxDBWriter.shared.writeTemperature(celsius: median, time: now)
                         await self.healthHRWriter.writeTemperature(celsius: median, time: now)
+                    }
+                }
+            } else if type == .realtimeHeartRate || type == .heartRate {
+                // HR spot-check: use only the LAST HALF of collected
+                // readings, then take the median.  The VC30F PPG sensor
+                // needs ~30s of warmup — early readings are elevated
+                // artefacts.  By discarding the first half we focus on
+                // the settled portion of the curve.
+                let allReadings = self.spotCheckHRReadings
+                self.spotCheckHRReadings.removeAll()
+
+                if allReadings.isEmpty {
+                    tLog("[SpotCheck] HR timeout — no valid readings in \(timeoutSeconds)s")
+                } else {
+                    // Take the latter half (settled readings)
+                    let halfIndex = allReadings.count / 2
+                    let settled = Array(allReadings.suffix(from: halfIndex))
+                    let sorted = settled.sorted()
+                    let median = sorted[sorted.count / 2]
+                    tLog("[SpotCheck] HR timeout — median \(median) bpm from last \(settled.count)/\(allReadings.count) readings (settled range \(sorted.first!)–\(sorted.last!)), all samples: \(allReadings)")
+                    let now = Date()
+                    self.lastInfluxHRWrite = now
+                    self.realTimeHeartRateBPM = median
+                    Task { @MainActor in
+                        InfluxDBWriter.shared.writeHeartRates([(bpm: median, time: now)])
+                        await self.healthHRWriter.writeHeartRate(bpm: median, time: now)
                     }
                 }
             } else if type == .spo2 {
