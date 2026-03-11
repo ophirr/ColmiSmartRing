@@ -18,6 +18,8 @@ struct GymScreenView: View {
     @State private var showingHistory = false
     @State private var showingSaveConfirm = false
     @State private var completedWorkout: CompletedWorkout?
+    @State private var finishedZoneTimeSeconds: [Double] = Array(repeating: 0, count: 6)
+    @State private var finishedDurationSeconds: Double = 0
     @Environment(\.colorScheme) private var colorScheme
     private let healthWriter = AppleHealthGymWriter()
 
@@ -251,6 +253,10 @@ struct GymScreenView: View {
 
                 Button {
                     completedWorkout = gymManager.stopWorkout()
+                    if let w = completedWorkout {
+                        finishedZoneTimeSeconds = w.zoneTimeSeconds
+                        finishedDurationSeconds = w.durationSeconds
+                    }
                     showingSaveConfirm = completedWorkout != nil
                 } label: {
                     ControlCircle(icon: "stop.fill", color: .red)
@@ -272,7 +278,7 @@ struct GymScreenView: View {
     // MARK: - Finished
 
     private var finishedContent: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 20) {
             Spacer()
 
             Image(systemName: "checkmark.circle.fill")
@@ -282,6 +288,38 @@ struct GymScreenView: View {
             Text("Workout Complete")
                 .font(.title.bold())
                 .foregroundStyle(.primary)
+
+            Text(formatDuration(finishedDurationSeconds))
+                .font(.title3)
+                .foregroundStyle(.secondary)
+
+            // Zone time breakdown — include all zones (rest through Z5)
+            let zones = HRZone.allCases
+            let hasAnyTime = finishedZoneTimeSeconds.reduce(0, +) > 0
+
+            if hasAnyTime {
+                VStack(spacing: 8) {
+                    ForEach(zones, id: \.rawValue) { zone in
+                        let secs = zone.rawValue < finishedZoneTimeSeconds.count ? finishedZoneTimeSeconds[zone.rawValue] : 0
+                        if secs > 0 {
+                            HStack(spacing: 12) {
+                                Circle()
+                                    .fill(zone.color)
+                                    .frame(width: 12, height: 12)
+                                Text(zone.colorLabel)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                                Text(formatDuration(secs))
+                                    .font(.subheadline.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 40)
+                .padding(.top, 8)
+            }
 
             Spacer()
         }

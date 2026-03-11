@@ -83,6 +83,10 @@ class RingSessionManager: NSObject {
 
     /// Unified PPG sensor state.  Only one measurement can run at a time.
     private(set) var sensorState: SensorState = .idle
+    /// Survives BLE disconnect — set by enterWorkoutMode, cleared by exitWorkoutMode.
+    /// Lets syncOnConnect know a gym session is in progress even though sensorState
+    /// was reset to .idle on disconnect.
+    private(set) var gymWorkoutInProgress = false
 
     /// Backward-compatible computed properties — external consumers
     /// (GymSessionManager, HomeScreenView, etc.) read these as before.
@@ -1255,6 +1259,23 @@ extension RingSessionManager {
     func syncOnConnect() {
         tLog("Sync on connect: starting…")
 
+        // If a gym workout is in progress, the disconnect killed the HR stream
+        // but GymSessionManager still considers itself .active.  Restore the
+        // sensor state to .workout and restart the real-time HR stream after
+        // a brief BLE settle delay instead of running the normal stop-all /
+        // spot-check flow.
+        if gymWorkoutInProgress {
+            tLog("[SyncOnConnect] Workout active on reconnect — restoring workout mode")
+            sensorState = .workout
+            getBatteryStatus { _ in }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, self.gymWorkoutInProgress else { return }
+                self.sendRealTimeStart(type: .realtimeHeartRate)
+                tLog("[SyncOnConnect] Workout HR stream restarted")
+            }
+            return
+        }
+
         // Kill any leftover real-time streams from a previous session.
         // The ring may still be streaming SpO2/HR/temp if the app was
         // backgrounded or disconnected without sending a stop command.
@@ -1777,11 +1798,13 @@ extension RingSessionManager {
 
     /// Enter workout mode.  Called by GymSessionManager.startWorkout().
     func enterWorkoutMode() {
+        gymWorkoutInProgress = true
         transitionSensor(to: .workout)
     }
 
     /// Exit workout mode.  Called by GymSessionManager.stopWorkout().
     func exitWorkoutMode() {
+        gymWorkoutInProgress = false
         if isWorkoutActive {
             transitionSensor(to: .idle)
         }
@@ -1880,26 +1903,25 @@ extension RingSessionManager {
 
             // VC30F PPG ground truth: the sensor needs warmup time
             // after every cold start.  Early readings are artefacts.
-            // For ALL sensor types we discard the first half of samples
-            // and take the median of the settled (latter) half.
+            // Take the last 5 readings — the sensor converges toward
+            // the true value over time, so the final samples are the
+            // most accurate.  Median of 5 gives noise protection.
             //
-            // Temperature additionally filters to body range (35-42°C)
+            // Temperature additionally filters to body range (35-38°C)
             // because the raw sensor swings wildly (27-57°C).
             if type == .temperature {
                 let allReadings = self.spotCheckTempReadings
                 self.spotCheckTempReadings.removeAll()
-                // Take latter half, then filter to body range
-                let halfIndex = allReadings.count / 2
-                let settled = Array(allReadings.suffix(from: halfIndex))
-                let inRange = settled.filter { $0 >= 35.0 && $0 <= 38.0 }
+                let tail = Array(allReadings.suffix(5))
+                let inRange = tail.filter { $0 >= 35.0 && $0 <= 38.0 }
 
                 if inRange.isEmpty {
                     let lastStr = allReadings.last.map { String(format: "%.1f", $0) } ?? "none"
-                    tLog("[SpotCheck] Temp timeout — 0 in-range from last \(settled.count)/\(allReadings.count) readings (last: \(lastStr)°C), discarding")
+                    tLog("[SpotCheck] Temp timeout — 0 in-range from last \(tail.count)/\(allReadings.count) readings (last: \(lastStr)°C), discarding")
                 } else {
                     let sorted = inRange.sorted()
                     let median = sorted[sorted.count / 2]
-                    tLog("[SpotCheck] Temp timeout — median \(String(format: "%.1f", median))°C from \(inRange.count) in-range of last \(settled.count)/\(allReadings.count) readings")
+                    tLog("[SpotCheck] Temp timeout — median \(String(format: "%.1f", median))°C from \(inRange.count) in-range of last \(tail.count)/\(allReadings.count) readings")
                     let now = Date()
                     self.lastInfluxTempWrite = now
                     self.realTimeTemperatureCelsius = median
@@ -1909,23 +1931,21 @@ extension RingSessionManager {
                     }
                 }
             } else if type == .realtimeHeartRate || type == .heartRate {
-                // HR spot-check: use only the LAST HALF of collected
-                // readings, then take the median.  The VC30F PPG sensor
-                // needs ~30s of warmup — early readings are elevated
-                // artefacts.  By discarding the first half we focus on
-                // the settled portion of the curve.
+                // HR spot-check: take the median of the LAST 5 readings.
+                // The VC30F PPG sensor needs ~45-60s to settle from warmup;
+                // the final readings are the most converged toward the true
+                // resting value.  Median of 5 gives noise protection without
+                // pulling in the warmup plateau.
                 let allReadings = self.spotCheckHRReadings
                 self.spotCheckHRReadings.removeAll()
 
                 if allReadings.isEmpty {
                     tLog("[SpotCheck] HR timeout — no valid readings in \(timeoutSeconds)s")
                 } else {
-                    // Take the latter half (settled readings)
-                    let halfIndex = allReadings.count / 2
-                    let settled = Array(allReadings.suffix(from: halfIndex))
-                    let sorted = settled.sorted()
+                    let tail = Array(allReadings.suffix(5))
+                    let sorted = tail.sorted()
                     let median = sorted[sorted.count / 2]
-                    tLog("[SpotCheck] HR timeout — median \(median) bpm from last \(settled.count)/\(allReadings.count) readings (settled range \(sorted.first!)–\(sorted.last!)), all samples: \(allReadings)")
+                    tLog("[SpotCheck] HR timeout — median \(median) bpm from last \(tail.count)/\(allReadings.count) readings (tail range \(sorted.first!)–\(sorted.last!)), all samples: \(allReadings)")
                     let now = Date()
                     self.lastInfluxHRWrite = now
                     self.realTimeHeartRateBPM = median
