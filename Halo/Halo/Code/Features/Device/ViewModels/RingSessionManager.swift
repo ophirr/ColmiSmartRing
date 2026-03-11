@@ -294,6 +294,10 @@ class RingSessionManager: NSObject {
     private let healthHRWriter = AppleHealthHeartRateWriter()
 
     private var characteristicsDiscovered = false
+    /// Tracks which notify characteristics have been confirmed by CoreBluetooth.
+    private var confirmedNotifyCharacteristics: Set<CBUUID> = []
+    /// Prevents syncOnConnect from firing more than once per connection.
+    private var syncOnConnectFired = false
 
     var batteryStatusCallback: ((BatteryInfo) -> Void)?
     var heartRateLogCallback: ((HeartRateLog) -> Void)?
@@ -716,6 +720,8 @@ extension RingSessionManager: CBCentralManagerDelegate {
         realTimeBloodOxygenPercent = nil
         realTimeTemperatureCelsius = nil
         characteristicsDiscovered = false
+        confirmedNotifyCharacteristics.removeAll()
+        syncOnConnectFired = false
         uartRxCharacteristic = nil
         uartTxCharacteristic = nil
         colmiWriteCharacteristic = nil
@@ -817,13 +823,24 @@ extension RingSessionManager: CBPeripheralDelegate {
                 tLog("DEBUG: Found other characteristic: \(characteristic.uuid)")
             }
         }
-        let wasReady = characteristicsDiscovered
         characteristicsDiscovered = (uartRxCharacteristic != nil && uartTxCharacteristic != nil)
-        if characteristicsDiscovered && !wasReady {
+        // syncOnConnect is deferred until notify subscriptions are confirmed
+        // in didUpdateNotificationStateFor — otherwise the ring receives
+        // commands but has nowhere to deliver responses.
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        if let error {
+            tLog("[Notify] Failed to subscribe to \(characteristic.uuid): \(error)")
+            return
+        }
+        tLog("[Notify] Subscribed to \(characteristic.uuid)")
+        confirmedNotifyCharacteristics.insert(characteristic.uuid)
+
+        let uartTXConfirmed = confirmedNotifyCharacteristics.contains(CBUUID(string: Self.uartTxCharacteristicUUID))
+        if characteristicsDiscovered && uartTXConfirmed && !syncOnConnectFired {
+            syncOnConnectFired = true
             syncOnConnect()
-            // Keepalive chain is started at the end of ensureHRLogSettings()
-            // (called by syncOnConnect) so it doesn't overlap with the
-            // initial sync and spot-check.
             DispatchQueue.main.async { [weak self] in
                 self?.onReadyForSettingsQuery?()
             }
@@ -1248,6 +1265,13 @@ extension RingSessionManager {
         sendRealTimeStop(type: .temperature)
 
         getBatteryStatus { _ in }
+        // Safety net: if battery response is lost in the post-restore data flood,
+        // retry once after 5s so the UI doesn't stay stuck on "--% Connect ring".
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            guard let self, self.currentBatteryInfo == nil else { return }
+            tLog("[SyncOnConnect] Battery still nil after 5s — retrying")
+            self.getBatteryStatus { _ in }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self else { return }
             // Skip if a workout started while we were waiting — BLE sync
