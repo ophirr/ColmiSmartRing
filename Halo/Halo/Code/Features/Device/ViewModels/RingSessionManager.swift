@@ -555,8 +555,7 @@ class RingSessionManager: NSObject {
                 tLog("[Connect] Re-connecting after cancel")
                 self.manager.connect(p, options: [
                     CBConnectPeripheralOptionNotifyOnConnectionKey: true,
-                    CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
-                    CBConnectPeripheralOptionStartDelayKey: 1
+                    CBConnectPeripheralOptionNotifyOnDisconnectionKey: true
                 ])
             }
             return
@@ -567,10 +566,12 @@ class RingSessionManager: NSObject {
             peripheral.discoverServices(nil)
             return
         }
+        // CoreBluetooth persists this connect request even when the app is
+        // suspended.  When the peripheral reappears, iOS wakes the app and
+        // delivers didConnect — no manual retry loop needed.
         manager.connect(peripheral, options: [
             CBConnectPeripheralOptionNotifyOnConnectionKey: true,
-            CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
-            CBConnectPeripheralOptionStartDelayKey: 1
+            CBConnectPeripheralOptionNotifyOnDisconnectionKey: true
         ])
     }
 
@@ -578,6 +579,8 @@ class RingSessionManager: NSObject {
         guard let peripheral, manager.state == .poweredOn else { return }
         reconnectTask?.cancel()  // User-initiated — don't auto-reconnect
         reconnectTask = nil
+        // cancelPeripheralConnection also cancels any pending persistent
+        // connect request, so the ring won't auto-reconnect.
         manager.cancelPeripheralConnection(peripheral)
     }
 
@@ -740,29 +743,29 @@ extension RingSessionManager: CBCentralManagerDelegate {
         stopKeepalive()
         stopPeriodicSync()
 
-        // Auto-reconnect if we have a saved ring (unexpected disconnect, e.g. phone locked).
+        // Auto-reconnect: immediately issue a persistent connect request.
+        // CoreBluetooth queues this and will complete it automatically when
+        // the peripheral reappears — even from the suspended/background state.
+        // This is the iOS-idiomatic pattern for bluetooth-central background mode.
         if savedRingIdentifier != nil {
-            tLog("[Reconnect] Unexpected disconnect — will attempt to reconnect in 2s")
-            reconnectTask?.cancel()
-            reconnectTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard let self, !Task.isCancelled, !self.peripheralConnected else { return }
-                tLog("[Reconnect] Attempting reconnect…")
-                self.findRingAgain()
-            }
+            tLog("[Reconnect] Unexpected disconnect — issuing persistent reconnect")
+            manager.connect(peripheral, options: [
+                CBConnectPeripheralOptionNotifyOnConnectionKey: true,
+                CBConnectPeripheralOptionNotifyOnDisconnectionKey: true
+            ])
         }
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: (any Error)?) {
         tLog("[Reconnect] Failed to connect: \(error.debugDescription)")
+        // Re-issue a persistent connect — CoreBluetooth will keep trying
+        // in the background until the peripheral reappears.
         if savedRingIdentifier != nil {
-            tLog("[Reconnect] Will retry in 5s…")
-            reconnectTask?.cancel()
-            reconnectTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard let self, !Task.isCancelled, !self.peripheralConnected else { return }
-                self.findRingAgain()
-            }
+            tLog("[Reconnect] Re-issuing persistent connect")
+            manager.connect(peripheral, options: [
+                CBConnectPeripheralOptionNotifyOnConnectionKey: true,
+                CBConnectPeripheralOptionNotifyOnDisconnectionKey: true
+            ])
         }
     }
 }
