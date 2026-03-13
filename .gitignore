@@ -64,4 +64,4 @@ fastlane/test_output
 .debug/
 .DS_Store
 # Local secrets
-Halo/Halo/Code/Utilities/Secrets.swift
+Biosense/Biosense/Code/Utilities/Secrets.swift
