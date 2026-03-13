@@ -21,7 +21,9 @@ struct ReadingsGraphsView: View {
 
     @State private var hrvSeriesAccumulator = SplitSeriesPacketParser.SeriesAccumulator()
     @State private var stressSeriesAccumulator = SplitSeriesPacketParser.SeriesAccumulator()
+    @State private var selectedTimeRange: TimeRange = .day
     @State private var selectedWeekOffset: Int = 0
+    @State private var selectedMonthOffset: Int = 0
     @State private var selectedDate: Date = Date()
     @State private var visibleWeekOffset: Int?
 
@@ -62,6 +64,138 @@ struct ReadingsGraphsView: View {
 
     private var selectedDayEnd: Date {
         mondayCalendar.date(byAdding: .day, value: 1, to: selectedDayStart) ?? selectedDayStart.addingTimeInterval(24 * 60 * 60)
+    }
+
+    // MARK: - Multi-day range (week / month)
+
+    private func monthStart(for offset: Int) -> Date {
+        let comps = mondayCalendar.dateComponents([.year, .month], from: Date())
+        let thisMonthStart = mondayCalendar.date(from: comps) ?? Date()
+        return mondayCalendar.date(byAdding: .month, value: -offset, to: thisMonthStart) ?? thisMonthStart
+    }
+
+    private var selectedRangeStart: Date {
+        switch selectedTimeRange {
+        case .day:   return selectedDayStart
+        case .week:  return weekStart(for: selectedWeekOffset)
+        case .month: return monthStart(for: selectedMonthOffset)
+        }
+    }
+
+    private var selectedRangeEnd: Date {
+        switch selectedTimeRange {
+        case .day:   return selectedDayEnd
+        case .week:
+            return mondayCalendar.date(byAdding: .day, value: 7, to: weekStart(for: selectedWeekOffset)) ?? selectedDayEnd
+        case .month:
+            return mondayCalendar.date(byAdding: .month, value: 1, to: monthStart(for: selectedMonthOffset)) ?? selectedDayEnd
+        }
+    }
+
+    /// X-axis domain for week/month charts (nil for day mode).
+    private var chartXDomain: ClosedRange<Date>? {
+        guard selectedTimeRange != .day else { return nil }
+        return selectedRangeStart...selectedRangeEnd
+    }
+
+    /// Label for the currently selected week (e.g. "Mar 3 – 9, 2026").
+    private var selectedWeekLabel: String {
+        let start = weekStart(for: selectedWeekOffset)
+        let end = mondayCalendar.date(byAdding: .day, value: 6, to: start) ?? start
+        let fmt = Date.FormatStyle().month(.abbreviated).day()
+        let yearFmt = Date.FormatStyle().year()
+        return "\(start.formatted(fmt)) – \(end.formatted(fmt)), \(end.formatted(yearFmt))"
+    }
+
+    /// Label for the currently selected month (e.g. "February 2026").
+    private var selectedMonthLabel: String {
+        let start = monthStart(for: selectedMonthOffset)
+        return start.formatted(.dateTime.month(.wide).year())
+    }
+
+    // MARK: - Range-filtered data (week / month)
+
+    private var rangeActivitySamples: [StoredActivitySample] {
+        storedActivitySamples.filter { $0.timestamp >= selectedRangeStart && $0.timestamp < selectedRangeEnd }
+            .sorted { $0.timestamp < $1.timestamp }
+    }
+
+    private var rangeHRVSamples: [StoredHRVSample] {
+        storedHRVSamples.filter { $0.timestamp >= selectedRangeStart && $0.timestamp < selectedRangeEnd }
+            .sorted { $0.timestamp < $1.timestamp }
+    }
+
+    private var rangeBloodOxygenSamples: [StoredBloodOxygenSample] {
+        storedBloodOxygenSamples.filter { $0.timestamp >= selectedRangeStart && $0.timestamp < selectedRangeEnd }
+            .sorted { $0.timestamp < $1.timestamp }
+    }
+
+    private var rangeStressSamples: [StoredStressSample] {
+        storedStressSamples.filter { $0.timestamp >= selectedRangeStart && $0.timestamp < selectedRangeEnd }
+            .sorted { $0.timestamp < $1.timestamp }
+    }
+
+    // MARK: - Daily aggregation helpers
+
+    /// Groups points by calendar day and reduces each day to a single value.
+    private func dailyAggregated(_ points: [TimeSeriesPoint], reduce: ([Double]) -> Double) -> [TimeSeriesPoint] {
+        let grouped = Dictionary(grouping: points) { mondayCalendar.startOfDay(for: $0.time) }
+        return grouped.map { (day, pts) in
+            TimeSeriesPoint(time: day, value: reduce(pts.map(\.value)))
+        }.sorted { $0.time < $1.time }
+    }
+
+    private func dailySum(_ points: [TimeSeriesPoint]) -> [TimeSeriesPoint] {
+        dailyAggregated(points) { $0.reduce(0, +) }
+    }
+
+    private func dailyAverage(_ points: [TimeSeriesPoint]) -> [TimeSeriesPoint] {
+        dailyAggregated(points) { vals in vals.isEmpty ? 0 : vals.reduce(0, +) / Double(vals.count) }
+    }
+
+    // MARK: - Aggregated range data
+
+    private var rangeActivityStepsDaily: [TimeSeriesPoint] {
+        dailySum(rangeActivitySamples.map { TimeSeriesPoint(time: $0.timestamp, value: Double($0.steps)) })
+    }
+    private var rangeActivityDistanceDaily: [TimeSeriesPoint] {
+        dailySum(rangeActivitySamples.map { TimeSeriesPoint(time: $0.timestamp, value: $0.distanceKm) })
+    }
+    private var rangeActivityCaloriesDaily: [TimeSeriesPoint] {
+        dailySum(rangeActivitySamples.map { TimeSeriesPoint(time: $0.timestamp, value: Double($0.calories)) })
+    }
+    private var rangeHRVDaily: [TimeSeriesPoint] {
+        dailyAverage(rangeHRVSamples.map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) })
+    }
+    private var rangeBloodOxygenDaily: [TimeSeriesPoint] {
+        dailyAverage(rangeBloodOxygenSamples.map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) })
+    }
+    private var rangeStressDaily: [TimeSeriesPoint] {
+        dailyAverage(rangeStressSamples.map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) })
+    }
+
+    /// Daily average heart rate from StoredHeartRateLog (one log per day).
+    private var rangeHeartRateDailyAverages: [TimeSeriesPoint] {
+        storedHeartRateLogs
+            .filter { $0.dayStart >= selectedRangeStart && $0.dayStart < selectedRangeEnd }
+            .compactMap { log in
+                let valid = log.heartRates.filter { $0 > 0 }
+                guard !valid.isEmpty else { return nil }
+                let avg = Double(valid.reduce(0, +)) / Double(valid.count)
+                return TimeSeriesPoint(time: log.dayStart, value: avg)
+            }
+            .sorted { $0.time < $1.time }
+    }
+
+    /// Sleep duration per night (in hours) for the selected range.
+    private var rangeSleepDurationDaily: [TimeSeriesPoint] {
+        sortedSleepDays
+            .filter { $0.sleepDate >= selectedRangeStart && $0.sleepDate < selectedRangeEnd }
+            .map { day in
+                let hours = Double(day.toSleepDay().totalDurationMinutes) / 60.0
+                return TimeSeriesPoint(time: day.sleepDate, value: hours)
+            }
+            .sorted { $0.time < $1.time }
     }
 
     private var selectedDayHeartRateLogs: [StoredHeartRateLog] {
@@ -136,7 +270,7 @@ struct ReadingsGraphsView: View {
     var body: some View {
         NavigationStack {
             List {
-                weekPickerSection
+                timeRangePickerSection
                 sleepSection
                 heartRateSection
                 if includeActivitySection {
@@ -158,28 +292,94 @@ struct ReadingsGraphsView: View {
         }
     }
 
-    private var weekPickerSection: some View {
+    // MARK: - Time range picker
+
+    private var timeRangePickerSection: some View {
         Section {
-            ScrollView(.horizontal) {
-                LazyHStack(spacing: 12) {
-                    ForEach(weekOffsets, id: \.self) { weekOffset in
-                        weekRow(for: weekOffset)
-                            .id(weekOffset)
-                            .containerRelativeFrame(.horizontal)
-                    }
+            Picker("Time Range", selection: $selectedTimeRange) {
+                ForEach(TimeRange.allCases) { range in
+                    Text(range.displayName).tag(range)
                 }
-                .scrollTargetLayout()
             }
-            .scrollIndicators(.hidden)
-            .scrollTargetBehavior(.viewAligned)
-            .scrollPosition(id: $visibleWeekOffset, anchor: .center)
-            .onChange(of: visibleWeekOffset) { _, newValue in
-                guard let newValue else { return }
-                let weekday = weekdayIndex(for: selectedDate, weekStart: weekStart(for: selectedWeekOffset))
-                selectedWeekOffset = newValue
-                moveSelectedDateToCurrentDisplayedWeek(weekdayIndex: weekday)
+            .pickerStyle(.segmented)
+
+            switch selectedTimeRange {
+            case .day:
+                dayPickerInline
+            case .week:
+                weekNavigationRow
+            case .month:
+                monthNavigationRow
             }
         }
+    }
+
+    private var dayPickerInline: some View {
+        ScrollView(.horizontal) {
+            LazyHStack(spacing: 12) {
+                ForEach(weekOffsets, id: \.self) { weekOffset in
+                    weekRow(for: weekOffset)
+                        .id(weekOffset)
+                        .containerRelativeFrame(.horizontal)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollIndicators(.hidden)
+        .scrollTargetBehavior(.viewAligned)
+        .scrollPosition(id: $visibleWeekOffset, anchor: .center)
+        .onChange(of: visibleWeekOffset) { _, newValue in
+            guard let newValue else { return }
+            let weekday = weekdayIndex(for: selectedDate, weekStart: weekStart(for: selectedWeekOffset))
+            selectedWeekOffset = newValue
+            moveSelectedDateToCurrentDisplayedWeek(weekdayIndex: weekday)
+        }
+    }
+
+    private var weekNavigationRow: some View {
+        HStack {
+            Button { selectedWeekOffset += 1 } label: {
+                Image(systemName: "chevron.left")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .disabled(selectedWeekOffset >= maxPastWeeks)
+            Spacer()
+            Text(selectedWeekLabel)
+                .font(.subheadline.weight(.medium))
+            Spacer()
+            Button { selectedWeekOffset -= 1 } label: {
+                Image(systemName: "chevron.right")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .disabled(selectedWeekOffset <= 0)
+        }
+        .buttonStyle(.borderless)
+        .padding(.vertical, 4)
+    }
+
+    private var monthNavigationRow: some View {
+        HStack {
+            Button { selectedMonthOffset += 1 } label: {
+                Image(systemName: "chevron.left")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .disabled(selectedMonthOffset >= 24)
+            Spacer()
+            Text(selectedMonthLabel)
+                .font(.subheadline.weight(.medium))
+            Spacer()
+            Button { selectedMonthOffset -= 1 } label: {
+                Image(systemName: "chevron.right")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .disabled(selectedMonthOffset <= 0)
+        }
+        .buttonStyle(.borderless)
+        .padding(.vertical, 4)
     }
 
     @ViewBuilder
@@ -232,18 +432,48 @@ struct ReadingsGraphsView: View {
 
     private var sleepSection: some View {
         Section {
-            if let storedDay = selectedSleepDay {
-                let day = storedDay.toSleepDay()
-                VStack(alignment: .leading, spacing: 16) {
-                    SleepChartKitView(day: day, nightDate: storedDay.sleepDate)
-                    SleepStageGraphView(day: day)
+            switch selectedTimeRange {
+            case .day:
+                if let storedDay = selectedSleepDay {
+                    let day = storedDay.toSleepDay()
+                    VStack(alignment: .leading, spacing: 16) {
+                        SleepChartKitView(day: day, nightDate: storedDay.sleepDate)
+                        SleepStageGraphView(day: day)
+                    }
+                    .padding(.vertical, 8)
+                } else {
+                    emptyStateView(message: L10n.Graphs.noSleepData)
                 }
-                .padding(.vertical, 8)
-            } else {
-                emptyStateView(message: L10n.Graphs.noSleepData)
+            case .week, .month:
+                if rangeSleepDurationDaily.isEmpty {
+                    emptyStateView(message: L10n.Graphs.noSleepData)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        sleepSummaryRow
+                        ActivityStepsChartView(
+                            data: rangeSleepDurationDaily,
+                            title: "Sleep (hours)",
+                            color: .indigo,
+                            timeRange: selectedTimeRange,
+                            xDomain: chartXDomain
+                        )
+                    }
+                    .padding(.vertical, 8)
+                }
             }
         } header: {
             Label(L10n.Graphs.sleepSection, systemImage: "bed.double.fill")
+        }
+    }
+
+    private var sleepSummaryRow: some View {
+        let values = rangeSleepDurationDaily.map(\.value)
+        let avg = values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count)
+        let avgH = Int(avg)
+        let avgM = Int((avg - Double(avgH)) * 60)
+        return HStack {
+            summaryPill(label: "Avg sleep", value: "\(avgH)h \(avgM)m")
+            summaryPill(label: "Nights", value: "\(values.count)")
         }
     }
 
@@ -277,15 +507,47 @@ struct ReadingsGraphsView: View {
 
     private var heartRateSection: some View {
         Section {
-            if selectedDayHeartRateLogs.isEmpty {
-                emptyStateView(message: L10n.Graphs.noHeartRateData)
-            } else {
-                if let log = selectedHeartRateLog {
-                    heartRateDetailChart(log: log)
+            switch selectedTimeRange {
+            case .day:
+                if selectedDayHeartRateLogs.isEmpty {
+                    emptyStateView(message: L10n.Graphs.noHeartRateData)
+                } else {
+                    if let log = selectedHeartRateLog {
+                        heartRateDetailChart(log: log)
+                    }
+                }
+            case .week, .month:
+                if rangeHeartRateDailyAverages.isEmpty {
+                    emptyStateView(message: L10n.Graphs.noHeartRateData)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        heartRateSummaryRow
+                        // Reuse HeartRateDataPoint for the daily-avg line chart
+                        let dailyPoints = rangeHeartRateDailyAverages.map {
+                            HeartRateDataPoint(heartRate: Int($0.value), time: $0.time)
+                        }
+                        Text("Daily average heart rate")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        HeartRateGraphView(data: dailyPoints, timeRange: selectedTimeRange, xDomain: chartXDomain)
+                    }
+                    .padding(.vertical, 8)
                 }
             }
         } header: {
             Label(L10n.Graphs.heartRateSection, systemImage: "heart.fill")
+        }
+    }
+
+    private var heartRateSummaryRow: some View {
+        let values = rangeHeartRateDailyAverages.map(\.value)
+        let avg = values.isEmpty ? 0 : Int(values.reduce(0, +) / Double(values.count))
+        let minV = values.isEmpty ? 0 : Int(values.min() ?? 0)
+        let maxV = values.isEmpty ? 0 : Int(values.max() ?? 0)
+        return HStack {
+            summaryPill(label: "Avg", value: "\(avg) bpm")
+            summaryPill(label: "Min", value: "\(minV) bpm")
+            summaryPill(label: "Max", value: "\(maxV) bpm")
         }
     }
 
@@ -319,30 +581,55 @@ struct ReadingsGraphsView: View {
     private var activitySection: some View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
-                if activityStepsData.isEmpty || activityDistanceData.isEmpty || activityCaloriesData.isEmpty {
-                    Text(L10n.Graphs.sampleActivity)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    ActivityStepsChartView(data: activityStepsData)
-                    ActivityStepsCumulativeComparisonChartView(
-                        comparisonData: PreviewData.stepsPerHourWeeklyAverage,
-                        data: activityStepsData
-                    )
-                    ActivityDistanceChartView(data: activityDistanceData)
-                    ActivityDistanceCumulativeComparisonChartView(
-                        comparisonData: PreviewData.distancePerHourWeeklyAverage,
-                        data: activityDistanceData
-                    )
-                    ActivityCaloriesChartView(data: activityCaloriesData)
-                    ActivityCaloriesCumulativeComparisonChartView(
-                        comparisonData: PreviewData.caloriesPerHourWeeklyAverage,
-                        data: activityCaloriesData
-                    )
+                switch selectedTimeRange {
+                case .day:
+                    if activityStepsData.isEmpty || activityDistanceData.isEmpty || activityCaloriesData.isEmpty {
+                        Text(L10n.Graphs.sampleActivity)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        ActivityStepsChartView(data: activityStepsData)
+                        ActivityStepsCumulativeComparisonChartView(
+                            comparisonData: PreviewData.stepsPerHourWeeklyAverage,
+                            data: activityStepsData
+                        )
+                        ActivityDistanceChartView(data: activityDistanceData)
+                        ActivityDistanceCumulativeComparisonChartView(
+                            comparisonData: PreviewData.distancePerHourWeeklyAverage,
+                            data: activityDistanceData
+                        )
+                        ActivityCaloriesChartView(data: activityCaloriesData)
+                        ActivityCaloriesCumulativeComparisonChartView(
+                            comparisonData: PreviewData.caloriesPerHourWeeklyAverage,
+                            data: activityCaloriesData
+                        )
+                    }
+                case .week, .month:
+                    if rangeActivityStepsDaily.isEmpty {
+                        Text(L10n.Graphs.sampleActivity)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        activitySummaryRow
+                        ActivityStepsChartView(data: rangeActivityStepsDaily, title: "Steps per day", timeRange: selectedTimeRange, xDomain: chartXDomain)
+                        ActivityDistanceChartView(data: rangeActivityDistanceDaily, title: "Distance per day", timeRange: selectedTimeRange, xDomain: chartXDomain)
+                        ActivityCaloriesChartView(data: rangeActivityCaloriesDaily, title: "Calories per day", timeRange: selectedTimeRange, xDomain: chartXDomain)
+                    }
                 }
             }
         } header: {
             Label(L10n.Graphs.activitySection, systemImage: "figure.walk")
+        }
+    }
+
+    private var activitySummaryRow: some View {
+        let totalSteps = Int(rangeActivityStepsDaily.map(\.value).reduce(0, +))
+        let totalDist = rangeActivityDistanceDaily.map(\.value).reduce(0, +)
+        let totalCal = Int(rangeActivityCaloriesDaily.map(\.value).reduce(0, +))
+        return HStack {
+            summaryPill(label: "Steps", value: "\(totalSteps)")
+            summaryPill(label: "Distance", value: String(format: "%.1f km", totalDist))
+            summaryPill(label: "Calories", value: "\(totalCal)")
         }
     }
 
@@ -351,12 +638,24 @@ struct ReadingsGraphsView: View {
     private var hrvSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
-                if hrvData.isEmpty {
-                    Text(L10n.Graphs.sampleHRV)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    HRVChartView(data: hrvData)
+                switch selectedTimeRange {
+                case .day:
+                    if hrvData.isEmpty {
+                        Text(L10n.Graphs.sampleHRV)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        HRVChartView(data: hrvData)
+                    }
+                case .week, .month:
+                    if rangeHRVDaily.isEmpty {
+                        Text(L10n.Graphs.sampleHRV)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        metricSummaryRow(data: rangeHRVDaily, unit: "ms")
+                        HRVChartView(data: rangeHRVDaily, title: "HRV (daily avg)", timeRange: selectedTimeRange, xDomain: chartXDomain)
+                    }
                 }
             }
         } header: {
@@ -369,12 +668,24 @@ struct ReadingsGraphsView: View {
     private var bloodOxygenSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
-                if bloodOxygenData.isEmpty {
-                    Text(L10n.Graphs.sampleBloodOxygen)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    BloodOxygenChartView(data: bloodOxygenData)
+                switch selectedTimeRange {
+                case .day:
+                    if bloodOxygenData.isEmpty {
+                        Text(L10n.Graphs.sampleBloodOxygen)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        BloodOxygenChartView(data: bloodOxygenData)
+                    }
+                case .week, .month:
+                    if rangeBloodOxygenDaily.isEmpty {
+                        Text(L10n.Graphs.sampleBloodOxygen)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        metricSummaryRow(data: rangeBloodOxygenDaily, unit: "%")
+                        BloodOxygenChartView(data: rangeBloodOxygenDaily, title: "Blood Oxygen (daily avg)", timeRange: selectedTimeRange, xDomain: chartXDomain)
+                    }
                 }
             }
         } header: {
@@ -387,12 +698,24 @@ struct ReadingsGraphsView: View {
     private var stressSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
-                if stressData.isEmpty {
-                    Text(L10n.Graphs.sampleStress)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    StressChartView(data: stressData)
+                switch selectedTimeRange {
+                case .day:
+                    if stressData.isEmpty {
+                        Text(L10n.Graphs.sampleStress)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        StressChartView(data: stressData)
+                    }
+                case .week, .month:
+                    if rangeStressDaily.isEmpty {
+                        Text(L10n.Graphs.sampleStress)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        metricSummaryRow(data: rangeStressDaily, unit: "")
+                        StressChartView(data: rangeStressDaily, title: "Stress (daily avg)", timeRange: selectedTimeRange, xDomain: chartXDomain)
+                    }
                 }
             }
         } header: {
@@ -706,6 +1029,37 @@ struct ReadingsGraphsView: View {
         let today = calendar.startOfDay(for: Date())
         let day = calendar.date(byAdding: .day, value: -daysAgo, to: today) ?? today
         return calendar.date(bySettingHour: max(0, min(23, hour)), minute: max(0, min(59, minute)), second: 0, of: day) ?? day
+    }
+
+    // MARK: - Summary helpers
+
+    private func summaryPill(label: String, value: String) -> some View {
+        VStack(spacing: 2) {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.primary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 6)
+        .background(Color(.tertiarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    /// Generic summary row for metrics with avg/min/max.
+    private func metricSummaryRow(data: [TimeSeriesPoint], unit: String) -> some View {
+        let values = data.map(\.value)
+        let avg = values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count)
+        let minV = values.min() ?? 0
+        let maxV = values.max() ?? 0
+        let suffix = unit.isEmpty ? "" : " \(unit)"
+        return HStack {
+            summaryPill(label: "Avg", value: String(format: "%.0f%@", avg, suffix))
+            summaryPill(label: "Min", value: String(format: "%.0f%@", minV, suffix))
+            summaryPill(label: "Max", value: String(format: "%.0f%@", maxV, suffix))
+        }
     }
 
     private func emptyStateView(message: String) -> some View {

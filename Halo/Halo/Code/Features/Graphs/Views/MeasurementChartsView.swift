@@ -9,12 +9,64 @@
 import SwiftUI
 import Charts
 
+// MARK: - Shared X-axis modifier
+
+extension View {
+    /// Applies chart X-axis marks and optional X-scale domain for the given time range.
+    @ViewBuilder
+    func timeRangeXAxis(_ timeRange: TimeRange, domain: ClosedRange<Date>? = nil) -> some View {
+        switch timeRange {
+        case .day:
+            self.optionalXDomain(domain).chartXAxis {
+                AxisMarks(values: .stride(by: .hour, count: 4)) { _ in
+                    AxisValueLabel(format: .dateTime.hour())
+                    AxisGridLine()
+                }
+            }
+        case .week:
+            self.optionalXDomain(domain).chartXAxis {
+                AxisMarks(values: .stride(by: .day, count: 1)) { _ in
+                    AxisValueLabel(format: .dateTime.weekday(.abbreviated))
+                    AxisGridLine()
+                }
+            }
+        case .month:
+            self.optionalXDomain(domain).chartXAxis {
+                AxisMarks(values: .stride(by: .day, count: 5)) { _ in
+                    AxisValueLabel(format: .dateTime.day())
+                    AxisGridLine()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func optionalXDomain(_ domain: ClosedRange<Date>?) -> some View {
+        if let domain {
+            self.chartXScale(domain: domain)
+        } else {
+            self
+        }
+    }
+}
+
+/// Returns a date range spanning most of the calendar day containing `date`,
+/// with insets scaled to the time range so bars are visually proportional.
+private func dayRange(for date: Date, timeRange: TimeRange) -> ClosedRange<Date> {
+    let cal = Calendar.current
+    let start = cal.startOfDay(for: date)
+    let inset: TimeInterval = timeRange == .week ? 3600 : 1800  // wider gaps for week, tighter for month
+    return start.addingTimeInterval(inset)...start.addingTimeInterval(86400 - inset)
+}
+
 // MARK: - Activity (Steps, Distance, Calories)
 
 struct ActivityStepsChartView: View {
     let data: [TimeSeriesPoint]
     var title: String = "Steps"
     var color: Color = .cyan
+    var timeRange: TimeRange = .day
+    var xDomain: ClosedRange<Date>? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -22,17 +74,22 @@ struct ActivityStepsChartView: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
             Chart(data) { point in
-                BarMark(
-                    x: .value("Time", point.time),
-                    y: .value("Value", point.value)
-                )
-                .foregroundStyle(color.gradient)
-            }
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .hour, count: 4)) { value in
-                    AxisValueLabel(format: .dateTime.hour())
+                if timeRange == .day {
+                    BarMark(
+                        x: .value("Time", point.time),
+                        y: .value("Value", point.value)
+                    )
+                    .foregroundStyle(color.gradient)
+                } else {
+                    BarMark(
+                        xStart: .value("Start", dayRange(for: point.time, timeRange: timeRange).lowerBound),
+                        xEnd: .value("End", dayRange(for: point.time, timeRange: timeRange).upperBound),
+                        y: .value("Value", point.value)
+                    )
+                    .foregroundStyle(color.gradient)
                 }
             }
+            .timeRangeXAxis(timeRange, domain: xDomain)
             .chartYAxis { AxisMarks(position: .leading) }
             .frame(height: 180)
         }
@@ -44,6 +101,8 @@ struct ActivityDistanceChartView: View {
     let data: [TimeSeriesPoint]
     var title: String = "Distance"
     var color: Color = .green
+    var timeRange: TimeRange = .day
+    var xDomain: ClosedRange<Date>? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -51,17 +110,22 @@ struct ActivityDistanceChartView: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
             Chart(data) { point in
-                BarMark(
-                    x: .value("Time", point.time),
-                    y: .value("Km", point.value)
-                )
-                .foregroundStyle(color.gradient)
-            }
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .hour, count: 4)) { value in
-                    AxisValueLabel(format: .dateTime.hour())
+                if timeRange == .day {
+                    BarMark(
+                        x: .value("Time", point.time),
+                        y: .value("Km", point.value)
+                    )
+                    .foregroundStyle(color.gradient)
+                } else {
+                    BarMark(
+                        xStart: .value("Start", dayRange(for: point.time, timeRange: timeRange).lowerBound),
+                        xEnd: .value("End", dayRange(for: point.time, timeRange: timeRange).upperBound),
+                        y: .value("Km", point.value)
+                    )
+                    .foregroundStyle(color.gradient)
                 }
             }
+            .timeRangeXAxis(timeRange, domain: xDomain)
             .chartYAxis { AxisMarks(position: .leading) }
             .frame(height: 180)
         }
@@ -73,6 +137,8 @@ struct ActivityCaloriesChartView: View {
     let data: [TimeSeriesPoint]
     var title: String = "Calories"
     var color: Color = .red
+    var timeRange: TimeRange = .day
+    var xDomain: ClosedRange<Date>? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -92,11 +158,7 @@ struct ActivityCaloriesChartView: View {
                 )
                 .foregroundStyle(color)
             }
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .hour, count: 4)) { value in
-                    AxisValueLabel(format: .dateTime.hour())
-                }
-            }
+            .timeRangeXAxis(timeRange, domain: xDomain)
             .chartYAxis { AxisMarks(position: .leading) }
             .frame(height: 180)
         }
@@ -388,6 +450,8 @@ struct HRVChartView: View {
     var title: String = "HRV"
     var unit: String = "ms"
     var yRange: ClosedRange<Double> = 0...178
+    var timeRange: TimeRange = .day
+    var xDomain: ClosedRange<Date>? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -403,11 +467,7 @@ struct HRVChartView: View {
                 .foregroundStyle(Color.orange.gradient)
             }
             .chartYScale(domain: yRange)
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .hour, count: 4)) { value in
-                    AxisValueLabel(format: .dateTime.hour())
-                }
-            }
+            .timeRangeXAxis(timeRange, domain: xDomain)
             .chartYAxis { AxisMarks(position: .leading) }
             .frame(height: 200)
         }
@@ -422,6 +482,8 @@ struct BloodOxygenChartView: View {
     var title: String = "Blood Oxygen"
     var unit: String = "%"
     var yRange: ClosedRange<Double> = 0...100
+    var timeRange: TimeRange = .day
+    var xDomain: ClosedRange<Date>? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -429,19 +491,24 @@ struct BloodOxygenChartView: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
             Chart(data) { point in
-                BarMark(
-                    x: .value("Time", point.time),
-                    y: .value(unit, point.value),
-                    width: .fixed(6)
-                )
-                .foregroundStyle(Color.blue.gradient)
-            }
-            .chartYScale(domain: yRange)
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .hour, count: 4)) { value in
-                    AxisValueLabel(format: .dateTime.hour())
+                if timeRange == .day {
+                    BarMark(
+                        x: .value("Time", point.time),
+                        y: .value(unit, point.value),
+                        width: .fixed(6)
+                    )
+                    .foregroundStyle(Color.blue.gradient)
+                } else {
+                    BarMark(
+                        xStart: .value("Start", dayRange(for: point.time, timeRange: timeRange).lowerBound),
+                        xEnd: .value("End", dayRange(for: point.time, timeRange: timeRange).upperBound),
+                        y: .value(unit, point.value)
+                    )
+                    .foregroundStyle(Color.blue.gradient)
                 }
             }
+            .chartYScale(domain: yRange)
+            .timeRangeXAxis(timeRange, domain: xDomain)
             .chartYAxis { AxisMarks(position: .leading) }
             .frame(height: 200)
         }
@@ -455,6 +522,8 @@ struct StressChartView: View {
     let data: [TimeSeriesPoint]
     var title: String = "Stress"
     var yRange: ClosedRange<Double> = 0...100
+    var timeRange: TimeRange = .day
+    var xDomain: ClosedRange<Date>? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -462,19 +531,24 @@ struct StressChartView: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
             Chart(data) { point in
-                BarMark(
-                    x: .value("Time", point.time),
-                    y: .value("Stress", point.value),
-                    width: .fixed(6)
-                )
-                .foregroundStyle(Color.mint.gradient)
-            }
-            .chartYScale(domain: yRange)
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .hour, count: 4)) { value in
-                    AxisValueLabel(format: .dateTime.hour())
+                if timeRange == .day {
+                    BarMark(
+                        x: .value("Time", point.time),
+                        y: .value("Stress", point.value),
+                        width: .fixed(6)
+                    )
+                    .foregroundStyle(Color.mint.gradient)
+                } else {
+                    BarMark(
+                        xStart: .value("Start", dayRange(for: point.time, timeRange: timeRange).lowerBound),
+                        xEnd: .value("End", dayRange(for: point.time, timeRange: timeRange).upperBound),
+                        y: .value("Stress", point.value)
+                    )
+                    .foregroundStyle(Color.mint.gradient)
                 }
             }
+            .chartYScale(domain: yRange)
+            .timeRangeXAxis(timeRange, domain: xDomain)
             .chartYAxis { AxisMarks(position: .leading) }
             .frame(height: 200)
         }

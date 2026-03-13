@@ -16,6 +16,8 @@ struct HeartRateDataPoint: Identifiable {
 
 struct HeartRateGraphView: View {
     let data: [HeartRateDataPoint]
+    var timeRange: TimeRange = .day
+    var xDomain: ClosedRange<Date>? = nil
 
     var body: some View {
         Chart {
@@ -24,19 +26,15 @@ struct HeartRateGraphView: View {
                     x: .value(L10n.HeartRateGraph.axisTime, point.time),
                     y: .value(L10n.HeartRateGraph.axisHeartRate, point.heartRate)
                 )
-                .interpolationMethod(.catmullRom) // Smooth the line
+                .interpolationMethod(.catmullRom)
             }
         }
         .chartYAxis {
-            AxisMarks(position: .leading) // Y-axis on the left
+            AxisMarks(position: .leading)
         }
-        .chartXAxis {
-            AxisMarks(values: .stride(by: .hour, count: 4)) { value in
-                AxisValueLabel(format: .dateTime.hour())
-            }
-        }
+        .timeRangeXAxis(timeRange, domain: xDomain)
         .padding()
-        .frame(height: 300) // Adjust graph size
+        .frame(height: 300)
     }
 }
 
