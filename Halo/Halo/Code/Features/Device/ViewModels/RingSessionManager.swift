@@ -652,7 +652,13 @@ extension RingSessionManager: CBCentralManagerDelegate {
                     tLog("Found previously connected peripheral")
                     peripheral = known
                     peripheral?.delegate = self
-                    connect()
+                    // Skip if a connect is already in-flight (e.g. foreground handler
+                    // called findRingAgain() before this delegate fired).
+                    if known.state == .connecting {
+                        tLog("[Connect] Already connecting — skipping duplicate connect")
+                    } else {
+                        connect()
+                    }
                 } else {
                     tLog("Known peripheral not found, starting scan")
                     startScanningForRing()
@@ -1558,18 +1564,20 @@ extension RingSessionManager {
         }
     }
 
-    /// Request activity data (steps/calories/distance) via Sports Data (Commands protocol, ID 67).
+    /// Request activity data (steps/calories/distance) via CMD_GET_STEP_SOMEDAY (0x43 / 67).
+    /// Sub-data: [dayOffset, 0x0F, 0x00, 0x5F, 0x01]  (matches Python colmi_r02_client).
     func syncActivityData(dayOffset: Int = 0) {
         do {
             let packet = try makePacket(command: Self.CMD_READ_ACTIVITY_DATA, subData: [
                 UInt8(dayOffset & 0xFF),
-                15,
-                0,
-                95
+                0x0F,
+                0x00,
+                0x5F,
+                0x01
             ])
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
-            tLog("Activity data requested (Commands 67, dayOffset: \(dayOffset))")
+            tLog("Activity data requested (CMD 0x43, dayOffset: \(dayOffset))")
         } catch {
             tLog("Failed to create activity packet: \(error)")
         }

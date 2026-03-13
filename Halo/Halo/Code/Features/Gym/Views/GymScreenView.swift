@@ -298,26 +298,39 @@ struct GymScreenView: View {
             let hasAnyTime = finishedZoneTimeSeconds.reduce(0, +) > 0
 
             if hasAnyTime {
-                VStack(spacing: 8) {
+                VStack(spacing: 10) {
                     ForEach(zones, id: \.rawValue) { zone in
                         let secs = zone.rawValue < finishedZoneTimeSeconds.count ? finishedZoneTimeSeconds[zone.rawValue] : 0
                         if secs > 0 {
-                            HStack(spacing: 12) {
+                            let range = gymManager.zoneConfig.bpmRange(for: zone)
+                            let dimZone = zone == .rest || zone == .zone1
+                            HStack(spacing: 0) {
                                 Circle()
                                     .fill(zone.color)
                                     .frame(width: 12, height: 12)
+                                    .padding(.trailing, 10)
                                 Text(zone.colorLabel)
-                                    .font(.subheadline)
+                                    .font(.body)
                                     .foregroundStyle(.primary)
-                                Spacer()
+                                Spacer(minLength: 4)
                                 Text(formatDuration(secs))
-                                    .font(.subheadline.monospacedDigit())
-                                    .foregroundStyle(.secondary)
+                                    .font(.body.monospacedDigit())
+                                    .foregroundStyle(dimZone ? .primary : .secondary)
+                                    .frame(width: 52, alignment: .trailing)
+                                Spacer(minLength: 4)
+                                HStack(spacing: 3) {
+                                    Text("\(range.lowerBound)–\(range.upperBound)")
+                                        .font(.body.monospacedDigit())
+                                    Text("bpm")
+                                        .font(.caption)
+                                }
+                                .foregroundStyle(dimZone ? .secondary : .tertiary)
+                                .frame(width: 100, alignment: .trailing)
                             }
                         }
                     }
                 }
-                .padding(.horizontal, 40)
+                .padding(.horizontal, 32)
                 .padding(.top, 8)
             }
 
