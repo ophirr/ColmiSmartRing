@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct CloudSyncSectionView: View {
-    @AppStorage("cloudSyncEnabled") private var syncEnabled = true
+    @AppStorage("cloudSyncEnabled") private var syncEnabled = false
     @State private var stats: String = ""
     private let timer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
 

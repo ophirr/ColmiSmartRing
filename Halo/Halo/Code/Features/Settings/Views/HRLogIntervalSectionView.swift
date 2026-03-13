@@ -11,8 +11,8 @@ import SwiftUI
 struct HRLogIntervalSectionView: View {
     @Bindable var ringSessionManager: RingSessionManager
 
-    @AppStorage("hrLogInterval") private var savedInterval: Int = 5
-    @State private var sliderValue: Double = 5
+    @AppStorage("hrLogInterval") private var savedInterval: Int = 1
+    @State private var sliderValue: Double = 1
     @State private var isSending = false
 
     private var isConnected: Bool { ringSessionManager.isEffectivelyConnected }

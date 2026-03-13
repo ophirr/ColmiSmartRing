@@ -17,7 +17,7 @@ final class RingDataPersistenceCoordinator {
     init(modelContext: ModelContext, ringSessionManager: RingSessionManager) {
         self.modelContext = modelContext
         self.ringSessionManager = ringSessionManager
-        if UserDefaults.standard.object(forKey: "cloudSyncEnabled") == nil || UserDefaults.standard.bool(forKey: "cloudSyncEnabled") {
+        if UserDefaults.standard.bool(forKey: "cloudSyncEnabled") {
             influx.start()
         }
     }

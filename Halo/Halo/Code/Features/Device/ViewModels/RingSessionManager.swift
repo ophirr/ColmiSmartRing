@@ -1347,7 +1347,7 @@ extension RingSessionManager {
     /// preference, write the preferred settings. This ensures HR logging survives ring reboots.
     /// After configuring, starts a periodic sync timer at the same interval.
     private func ensureHRLogSettings() async {
-        let savedInterval = UserDefaults.standard.object(forKey: "hrLogInterval") as? Int ?? 5
+        let savedInterval = UserDefaults.standard.object(forKey: "hrLogInterval") as? Int ?? 1
         let ringSettings = try? await readHRLogSettings()
         tLog("[SyncOnConnect] HR log settings: enabled=\(ringSettings?.enabled ?? false), interval=\(ringSettings?.intervalMinutes ?? 0)min")
 
