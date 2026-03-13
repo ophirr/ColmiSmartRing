@@ -1,26 +1,26 @@
-# Releasing Vitality Ring via TestFlight
+# Releasing Biosense via TestFlight
 
-Guide for archiving, uploading, and distributing the Vitality Ring app to testers.
+Guide for archiving, uploading, and distributing the Biosense app to testers.
 
 ## Prerequisites
 
 - **Apple Developer Program** membership ($99/year) — [enroll here](https://developer.apple.com/programs/)
-- Xcode with your team signing identity (Team ID: `838MD85XGA`, automatic signing)
-- An app record in [App Store Connect](https://appstoreconnect.apple.com) for bundle ID `com.ophirronen.halo`
+- Xcode with your team signing identity (automatic signing)
+- An app record in [App Store Connect](https://appstoreconnect.apple.com) for bundle ID `com.biosense.ring`
 
 ## One-Time Setup
 
 1. **Create the App Store Connect record**
    - Go to App Store Connect > My Apps > "+" > New App
    - Platform: iOS
-   - Name: Vitality Ring
+   - Name: Biosense
    - Primary language: English
-   - Bundle ID: `com.ophirronen.halo`
-   - SKU: `vitality-ring-1` (or any unique string)
+   - Bundle ID: `com.biosense.ring`
+   - SKU: `biosense-ring-1` (or any unique string)
 
 2. **Verify HealthKit capability**
    - Apple Developer portal > Certificates, Identifiers & Profiles > Identifiers
-   - Find `com.ophirronen.halo` and confirm **HealthKit** is enabled
+   - Find `com.biosense.ring` and confirm **HealthKit** is enabled
    - (Xcode automatic signing usually handles this, but verify the first time)
 
 ## Releasing a Build
@@ -29,13 +29,13 @@ Guide for archiving, uploading, and distributing the Vitality Ring app to tester
 
 Each upload needs a unique build number. In Xcode:
 
-- Select the **Halo** target > General > Identity
+- Select the **Biosense** target > General > Identity
 - Increment **Build** (e.g. 1 → 2 → 3 ...). Marketing version can stay at `1.0` until a real release.
 
 Or from the command line:
 
 ```bash
-# In the Halo/ directory
+# In the Biosense/ directory
 agvtool next-version -all     # increments build number
 agvtool what-version           # verify
 ```
@@ -58,7 +58,7 @@ The build takes 5–30 minutes to process on Apple's side. You'll get an email w
 
 ### 4. Release to Testers
 
-1. Go to [App Store Connect](https://appstoreconnect.apple.com) > My Apps > Vitality Ring > TestFlight
+1. Go to [App Store Connect](https://appstoreconnect.apple.com) > My Apps > Biosense > TestFlight
 2. The new build appears under "iOS Builds" once processing completes
 3. If this is the first build, Apple may ask for export compliance info (select "No" — the app uses no encryption beyond HTTPS)
 4. Add testers:
