@@ -299,6 +299,13 @@ struct ReadingsGraphsView: View {
                 visibleWeekOffset = selectedWeekOffset
                 wireLiveMetricCallbacks()
             }
+            .onChange(of: selectedTimeRange) { _, _ in
+                // Reset to current date/week/month so user doesn't land on an empty historical period
+                selectedDate = todayStart
+                selectedWeekOffset = 0
+                selectedMonthOffset = 0
+                visibleWeekOffset = 0
+            }
         }
     }
 
