@@ -21,12 +21,8 @@ struct HeartRateSectionView: View {
                 ringSessionManager.getHeartRateLog { hrl in
                     Task { @MainActor in
                         saveHeartRateLog(hrl)
-                        do {
-                            let heartRatesWithTimes = try hrl.heartRatesWithTimes()
-                            data = heartRatesWithTimes.map { HeartRateDataPoint(heartRate: $0.0, time: $0.1) }
-                        } catch {
-                            tLog("Error loading data: \(error)")
-                        }
+                        let heartRatesWithTimes = hrl.heartRatesWithTimes()
+                        data = heartRatesWithTimes.map { HeartRateDataPoint(heartRate: $0.0, time: $0.1) }
                     }
                 }
             } label: {
@@ -91,12 +87,8 @@ struct HeartRateSectionView: View {
 
     private func loadMostRecentHeartRateFromStorage() {
         guard let log = storedHeartRateLogs.first else { return }
-        do {
-            let heartRatesWithTimes = try log.toHeartRateLog().heartRatesWithTimes()
-            data = heartRatesWithTimes.map { HeartRateDataPoint(heartRate: $0.0, time: $0.1) }
-        } catch {
-            tLog("Error loading stored heart rate: \(error)")
-        }
+        let heartRatesWithTimes = log.toHeartRateLog().heartRatesWithTimes()
+        data = heartRatesWithTimes.map { HeartRateDataPoint(heartRate: $0.0, time: $0.1) }
     }
 
     private func saveHeartRateLog(_ log: HeartRateLog) {

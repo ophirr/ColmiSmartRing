@@ -132,13 +132,10 @@ func readXPacket(for target: Date) throws -> [UInt8] {
     return try makePacket(command: Counter.shared.CMD_X, subData: data)
 }
 
-func addTimes(heartRates: [Int], timestamp: Date) throws -> [(Int, Date)] {
-    guard heartRates.count == 288 else {
-        throw HeartRateError.invalidHeartRateCount
-    }
+func addTimes(heartRates: [Int], timestamp: Date, rangeMinutes: Int = 5) -> [(Int, Date)] {
     var result: [(Int, Date)] = []
     var current = Calendar.current.startOfDay(for: timestamp)
-    let interval = TimeInterval(5 * 60) // 5 minutes
+    let interval = TimeInterval(max(rangeMinutes, 1) * 60)
     for hr in heartRates {
         result.append((hr, current))
         current.addTimeInterval(interval)
@@ -155,8 +152,8 @@ struct HeartRateLog {
     var index: Int
     var range: Int
     
-    func heartRatesWithTimes() throws -> [(Int, Date)] {
-        return try addTimes(heartRates: heartRates, timestamp: timestamp)
+    func heartRatesWithTimes() -> [(Int, Date)] {
+        return addTimes(heartRates: heartRates, timestamp: timestamp, rangeMinutes: range)
             .filter { $0.0 > 0 } // Filter out zeros and -1 sentinel values
     }
 }
@@ -275,26 +272,23 @@ class HeartRateLogParser {
     }
     
     var heartRates: [Int] {
+        let effectiveRange = max(range, 1)
+        let expectedCount = (24 * 60) / effectiveRange   // 288 at 5-min, 1440 at 1-min
         var hr = rawHeartRates
-        if hr.count > 288 {
-            hr = Array(hr.prefix(288))
-        } else if hr.count < 288 {
-            hr.append(contentsOf: Array(repeating: 0, count: 288 - hr.count))
+        if hr.count > expectedCount {
+            hr = Array(hr.prefix(expectedCount))
+        } else if hr.count < expectedCount {
+            hr.append(contentsOf: Array(repeating: 0, count: expectedCount - hr.count))
         }
-        
+
         if isToday() {
-            let minutesElapsed = (Calendar.current.dateComponents([.minute], from: Calendar.current.startOfDay(for: Date()), to: Date()).minute ?? 0) / 5
+            let minutesElapsed = (Calendar.current.dateComponents([.minute], from: Calendar.current.startOfDay(for: Date()), to: Date()).minute ?? 0) / effectiveRange
             for i in minutesElapsed..<hr.count {
                 hr[i] = 0
             }
         }
         return hr
     }
-}
-
-// Custom Errors
-enum HeartRateError: Error {
-    case invalidHeartRateCount
 }
 
 func extractTimestamp(from packet: [UInt8]) -> UInt32 {

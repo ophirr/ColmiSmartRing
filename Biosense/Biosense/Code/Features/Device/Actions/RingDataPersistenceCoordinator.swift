@@ -28,6 +28,9 @@ final class RingDataPersistenceCoordinator {
         // and stamped everything as "today").  Safe to remove after a few releases.
         purgeStaleActivitySamples()
 
+        // Backfill nightDate for sleep records migrated from schema without it.
+        backfillSleepNightDates()
+
         ringSessionManager.bigDataSleepPersistenceCallback = { [weak self] sleepData in
             guard let self else { return }
             self.persistSleepData(sleepData)
@@ -80,15 +83,20 @@ final class RingDataPersistenceCoordinator {
         for day in bigData.days {
             let daysAgo = Int(day.daysAgo)
             let nightDate = calendar.date(byAdding: .day, value: -daysAgo, to: today) ?? today
+            // Dedup on the actual calendar date so older syncs are preserved
+            // when daysAgo values shift across syncs.
+            let nightEnd = calendar.date(byAdding: .day, value: 1, to: nightDate) ?? nightDate
             let descriptor = FetchDescriptor<StoredSleepDay>(
-                predicate: #Predicate<StoredSleepDay> { $0.daysAgo == daysAgo }
+                predicate: #Predicate<StoredSleepDay> { $0.nightDate >= nightDate && $0.nightDate < nightEnd }
             )
             let existing = (try? modelContext.fetch(descriptor))?.first
             if let existingDay = existing {
                 updatedDays += 1
+                existingDay.daysAgo = daysAgo
                 existingDay.sleepStart = Int(day.sleepStart)
                 existingDay.sleepEnd = Int(day.sleepEnd)
                 existingDay.syncDate = Date()
+                existingDay.nightDate = nightDate
                 for period in existingDay.periods {
                     modelContext.delete(period)
                 }
@@ -107,6 +115,7 @@ final class RingDataPersistenceCoordinator {
                     sleepStart: Int(day.sleepStart),
                     sleepEnd: Int(day.sleepEnd),
                     syncDate: Date(),
+                    nightDate: nightDate,
                     periods: storedPeriods
                 )
                 modelContext.insert(storedDay)
@@ -168,11 +177,12 @@ final class RingDataPersistenceCoordinator {
         _ = saveContext(tag: "HeartRate")
 
         // Stream to InfluxDB
-        if let readings = try? log.heartRatesWithTimes() {
+        let readings = log.heartRatesWithTimes()
+        if !readings.isEmpty {
             tLog("[AutoPersist] HR log → InfluxDB: \(readings.count) non-zero readings")
             influx.writeHeartRates(readings.map { (bpm: $0.0, time: $0.1) })
         } else {
-            tLog("[AutoPersist] HR log → InfluxDB: heartRatesWithTimes() failed or empty")
+            tLog("[AutoPersist] HR log → InfluxDB: no non-zero readings")
         }
     }
 
@@ -194,6 +204,36 @@ final class RingDataPersistenceCoordinator {
             tLog("[ActivityMigration] Purged \(all.count) stale activity samples")
         } catch {
             tLog("[ActivityMigration] Purge failed: \(error)")
+        }
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    /// Backfill `nightDate` for StoredSleepDay records created before the field existed.
+    /// After lightweight migration these rows have `Date.distantPast`; recompute from
+    /// `syncDate` and `daysAgo`.
+    private func backfillSleepNightDates() {
+        let key = "sleepNightDateBackfilled"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+
+        do {
+            let sentinel = Date.distantPast
+            let descriptor = FetchDescriptor<StoredSleepDay>(
+                predicate: #Predicate<StoredSleepDay> { $0.nightDate == sentinel }
+            )
+            let stale = try modelContext.fetch(descriptor)
+            guard !stale.isEmpty else {
+                UserDefaults.standard.set(true, forKey: key)
+                return
+            }
+            let calendar = Calendar.current
+            for day in stale {
+                let base = calendar.startOfDay(for: day.syncDate)
+                day.nightDate = calendar.date(byAdding: .day, value: -day.daysAgo, to: base) ?? base
+            }
+            try modelContext.save()
+            tLog("[SleepMigration] Backfilled nightDate for \(stale.count) sleep records")
+        } catch {
+            tLog("[SleepMigration] Backfill failed: \(error)")
         }
         UserDefaults.standard.set(true, forKey: key)
     }

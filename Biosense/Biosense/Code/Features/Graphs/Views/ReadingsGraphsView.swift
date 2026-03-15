@@ -271,7 +271,6 @@ struct ReadingsGraphsView: View {
         NavigationStack {
             List {
                 timeRangePickerSection
-                sleepSection
                 heartRateSection
                 if includeActivitySection {
                     activitySection
@@ -279,11 +278,22 @@ struct ReadingsGraphsView: View {
                 hrvSection
                 bloodOxygenSection
                 stressSection
+                sleepSection
                 realTimeTrackingSection
             }
             .listStyle(.insetGrouped)
             .navigationTitle(L10n.Graphs.navTitle)
             .navigationBarTitleDisplayMode(.large)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 50)
+                    .onEnded { value in
+                        // Require clearly horizontal swipe (not vertical scroll)
+                        guard abs(value.translation.width) > abs(value.translation.height) * 2.0 else { return }
+                        guard abs(value.translation.width) > 80 else { return }
+                        let swipedRight = value.translation.width > 0
+                        navigateTimePeriod(forward: !swipedRight)
+                    }
+            )
             .onAppear {
                 selectedDate = todayStart
                 visibleWeekOffset = selectedWeekOffset
@@ -477,6 +487,44 @@ struct ReadingsGraphsView: View {
         }
     }
 
+    /// Navigate the selected time period by one increment.
+    /// `forward: true` moves toward the present; `forward: false` moves into the past.
+    private func navigateTimePeriod(forward: Bool) {
+        switch selectedTimeRange {
+        case .day:
+            if forward {
+                guard selectedDayStart < todayStart else { return }
+                selectedDate = mondayCalendar.date(byAdding: .day, value: 1, to: selectedDate) ?? selectedDate
+            } else {
+                selectedDate = mondayCalendar.date(byAdding: .day, value: -1, to: selectedDate) ?? selectedDate
+            }
+            // Keep the week offset & visible week in sync with the new date.
+            let dayWeekStart = mondayCalendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: selectedDate)
+            let dateWeekStart = mondayCalendar.date(from: dayWeekStart) ?? currentWeekStart
+            let weekDelta = mondayCalendar.dateComponents([.day], from: dateWeekStart, to: currentWeekStart).day ?? 0
+            let newWeekOffset = weekDelta / 7
+            selectedWeekOffset = newWeekOffset
+            visibleWeekOffset = newWeekOffset
+        case .week:
+            if forward {
+                guard selectedWeekOffset > 0 else { return }
+                selectedWeekOffset -= 1
+            } else {
+                guard selectedWeekOffset < maxPastWeeks else { return }
+                selectedWeekOffset += 1
+            }
+            visibleWeekOffset = selectedWeekOffset
+        case .month:
+            if forward {
+                guard selectedMonthOffset > 0 else { return }
+                selectedMonthOffset -= 1
+            } else {
+                guard selectedMonthOffset < 24 else { return }
+                selectedMonthOffset += 1
+            }
+        }
+    }
+
     private func moveSelectedDateToCurrentDisplayedWeek(weekdayIndex: Int) {
         guard let target = mondayCalendar.date(byAdding: .day, value: weekdayIndex, to: weekStart(for: selectedWeekOffset)) else { return }
         let start = mondayCalendar.startOfDay(for: target)
@@ -556,8 +604,8 @@ struct ReadingsGraphsView: View {
     }
 
     private func heartRateDetailChart(log: StoredHeartRateLog) -> some View {
-        let points: [HeartRateDataPoint] = (try? log.toHeartRateLog().heartRatesWithTimes())
-            .map { $0.map { HeartRateDataPoint(heartRate: $0.0, time: $0.1) } } ?? []
+        let points: [HeartRateDataPoint] = log.toHeartRateLog().heartRatesWithTimes()
+            .map { HeartRateDataPoint(heartRate: $0.0, time: $0.1) }
         let interval = ringSessionManager.hrLogIntervalMinutes ?? 5
         return VStack(alignment: .leading, spacing: 8) {
             Text("Heart rate (\(interval)‑min intervals)")

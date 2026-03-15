@@ -113,15 +113,20 @@ struct SleepSectionView: View {
         for day in bigData.days {
             let daysAgo = Int(day.daysAgo)
             let nightDate = calendar.date(byAdding: .day, value: -daysAgo, to: today) ?? today
+            // Dedup on the actual calendar date so older syncs are preserved
+            // when daysAgo values shift across syncs.
+            let nightEnd = calendar.date(byAdding: .day, value: 1, to: nightDate) ?? nightDate
             let descriptor = FetchDescriptor<StoredSleepDay>(
-                predicate: #Predicate<StoredSleepDay> { $0.daysAgo == daysAgo }
+                predicate: #Predicate<StoredSleepDay> { $0.nightDate >= nightDate && $0.nightDate < nightEnd }
             )
             let existing = (try? modelContext.fetch(descriptor))?.first
             if let existingDay = existing {
                 updatedDays += 1
+                existingDay.daysAgo = daysAgo
                 existingDay.sleepStart = Int(day.sleepStart)
                 existingDay.sleepEnd = Int(day.sleepEnd)
                 existingDay.syncDate = Date()
+                existingDay.nightDate = nightDate
                 for p in existingDay.periods { modelContext.delete(p) }
                 existingDay.periods = []
                 let newPeriods = makeStoredPeriods(from: day, nightDate: nightDate)
@@ -138,6 +143,7 @@ struct SleepSectionView: View {
                     sleepStart: Int(day.sleepStart),
                     sleepEnd: Int(day.sleepEnd),
                     syncDate: Date(),
+                    nightDate: nightDate,
                     periods: storedPeriods
                 )
                 modelContext.insert(storedDay)

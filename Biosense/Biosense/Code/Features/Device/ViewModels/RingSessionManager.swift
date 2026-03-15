@@ -635,7 +635,7 @@ extension RingSessionManager: CBCentralManagerDelegate {
         tLog("[Restore] CoreBluetooth restoring state")
         if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
            let restored = peripherals.first {
-            tLog("[Restore] Restored peripheral: \(restored.identifier)")
+            tLog("[Restore] Restored peripheral: \(restored.identifier), state=\(restored.state.rawValue)")
             self.peripheral = restored
             restored.delegate = self
         }
@@ -946,7 +946,10 @@ extension RingSessionManager: CBPeripheralDelegate {
                     }
                 case .spo2:
                     tLog("[SpO2] Response on 0x69 — value=\(readingValue) error=\(errorCode) pkt=\(packet.prefix(6).map { String(format: "%02x", $0) }.joined(separator: " "))")
-                    guard readingValue > 0, readingValue <= 100 else { break }
+                    guard readingValue >= 70, readingValue <= 100 else {
+                        tLog("[SpO2] Discarding out-of-range value: \(readingValue)%")
+                        break
+                    }
                     realTimeBloodOxygenPercent = Int(readingValue)
 
                     // Spot-check: got a valid SpO2 reading — write to InfluxDB/HealthKit and stop.
@@ -1022,7 +1025,7 @@ extension RingSessionManager: CBPeripheralDelegate {
             if hrValue == 0 {
                 if isWorkoutActive { realTimeHeartRateBPM = nil }
                 tLog("[RT-HR30] heartRate=0 (warmup)")
-            } else if hrValue <= 220 {
+            } else if hrValue >= 30 && hrValue <= 220 {
                 realTimeHeartRateBPM = Int(hrValue)
                 tLog("[RT-HR30] heartRate=\(hrValue)")
                 if now.timeIntervalSince(lastInfluxHRWrite) >= currentInfluxWriteInterval {
@@ -1112,6 +1115,7 @@ extension RingSessionManager {
         }
     }
 }
+
 
 // MARK: - Big Data (Colmi service)
 
@@ -1317,25 +1321,31 @@ extension RingSessionManager {
                 tLog("[SyncOnConnect] Workout active — skipping HR log sync")
                 return
             }
-            self.getHeartRateLog { _ in }
+            self.getHeartRateLog(dayOffset: 0) { _ in }
         }
+        // Fetch yesterday's HR log too — overnight readings before midnight
+        // land on the previous day's log and would otherwise be missed.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
             guard let self, !self.isWorkoutActive else { return }
-            self.syncHRVData(dayOffset: 0)
+            self.getHeartRateLog(dayOffset: 1) { _ in }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
             guard let self, !self.isWorkoutActive else { return }
-            self.syncBloodOxygen(dayOffset: 0)
+            self.syncHRVData(dayOffset: 0)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self, !self.isWorkoutActive else { return }
-            self.syncPressureData(dayOffset: 0)
+            self.syncBloodOxygen(dayOffset: 0)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) { [weak self] in
             guard let self, !self.isWorkoutActive else { return }
-            self.syncActivityData(dayOffset: 0)
+            self.syncPressureData(dayOffset: 0)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) { [weak self] in
+            guard let self, !self.isWorkoutActive else { return }
+            self.syncActivityData(dayOffset: 0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.8) { [weak self] in
             guard let self else { return }
             Task { @MainActor in
                 await self.ensureHRLogSettings()
@@ -1446,23 +1456,26 @@ extension RingSessionManager {
             startSpotCheck()
         }
 
-        getHeartRateLog { _ in }
+        getHeartRateLog(dayOffset: 0) { _ in }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            self?.syncHRVData(dayOffset: 0)
+            self?.getHeartRateLog(dayOffset: 1) { _ in }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            self?.syncBloodOxygen(dayOffset: 0)
+            self?.syncHRVData(dayOffset: 0)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
-            self?.syncPressureData(dayOffset: 0)
+            self?.syncBloodOxygen(dayOffset: 0)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
+            self?.syncPressureData(dayOffset: 0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             self?.syncActivityData(dayOffset: 0)
         }
 
         // Re-check HR log settings — the ring firmware resets them on its own
         // midnight reboot, so we need to periodically re-apply.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) { [weak self] in
             guard let self else { return }
             Task { @MainActor in
                 await self.ensureHRLogSettings()
@@ -2105,23 +2118,26 @@ extension RingSessionManager {
                 // Stagger syncs so commands don't pile up on the ring.
                 // Start after 20 s — gives the spot-check time to finish first.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
-                    self?.getHeartRateLog { _ in }
+                    self?.getHeartRateLog(dayOffset: 0) { _ in }
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 22) { [weak self] in
-                    self?.syncHRVData(dayOffset: 0)
+                    self?.getHeartRateLog(dayOffset: 1) { _ in }
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 24) { [weak self] in
-                    self?.syncBloodOxygen(dayOffset: 0)
+                    self?.syncHRVData(dayOffset: 0)
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 26) { [weak self] in
-                    self?.syncPressureData(dayOffset: 0)
+                    self?.syncBloodOxygen(dayOffset: 0)
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 28) { [weak self] in
+                    self?.syncPressureData(dayOffset: 0)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
                     self?.syncActivityData(dayOffset: 0)
                 }
                 // Re-check HR log settings — the ring firmware resets them
                 // on its own midnight reboot cycle.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 32) { [weak self] in
                     guard let self else { return }
                     Task { @MainActor in
                         await self.ensureHRLogSettings()
@@ -2323,22 +2339,22 @@ extension RingSessionManager {
         return calendar.date(byAdding: .day, value: -dayOffset, to: start)
     }
 
-    func getHeartRateLog(completion: @escaping (HeartRateLog) -> Void) {
+    func getHeartRateLog(dayOffset: Int = 0, completion: @escaping (HeartRateLog) -> Void) {
         guard let uartRxCharacteristic, let peripheral else {
             tLog("Cannot send heart rate log request. Peripheral or characteristic not ready.")
             return
         }
-        
+
         do {
-            guard let target = dayStartInPreferredTimeZone(for: Date.now, dayOffset: 0) else {
+            guard let target = dayStartInPreferredTimeZone(for: Date.now, dayOffset: dayOffset) else {
                 return
             }
             let packet = try readHeartRatePacket(for: target)
             let data = Data(packet)
             peripheral.writeValue(data, for: uartRxCharacteristic, type: .withResponse)
-            
-            tLog("HRL Commmand Sent")
-            
+
+            tLog("HRL Command Sent (dayOffset: \(dayOffset))")
+
             // Store completion handler to call when data is received
             self.heartRateLogCallback = completion
         } catch {

@@ -45,29 +45,30 @@ final class StoredSleepDay {
     var sleepStart: Int
     var sleepEnd: Int
     var syncDate: Date
+    /// The actual calendar date of this sleep night (start-of-day). Used for deduplication
+    /// so that data is preserved across syncs instead of being overwritten by `daysAgo` shifts.
+    /// Default value allows lightweight migration from older schema without this field.
+    var nightDate: Date = Date.distantPast
 
     @Relationship(deleteRule: .cascade, inverse: \StoredSleepPeriod.day)
     var periods: [StoredSleepPeriod] = []
 
-    init(daysAgo: Int, sleepStart: Int, sleepEnd: Int, syncDate: Date = Date(), periods: [StoredSleepPeriod]) {
+    init(daysAgo: Int, sleepStart: Int, sleepEnd: Int, syncDate: Date = Date(), nightDate: Date? = nil, periods: [StoredSleepPeriod]) {
         self.daysAgo = daysAgo
         self.sleepStart = sleepStart
         self.sleepEnd = sleepEnd
         self.syncDate = syncDate
+        let calendar = Calendar.current
+        self.nightDate = nightDate ?? calendar.date(byAdding: .day, value: -daysAgo, to: calendar.startOfDay(for: syncDate)) ?? syncDate
         self.periods = periods
         for p in periods {
             p.day = self
         }
     }
 
-    /// Calendar date of this sleep night based on sync date and daysAgo from the packet.
+    /// Calendar date of this sleep night. Now backed by stored `nightDate` field.
     var sleepDate: Date {
-        let calendar = Calendar.current
-        let base = calendar.startOfDay(for: syncDate)
-        guard let adjusted = calendar.date(byAdding: .day, value: -daysAgo, to: base) else {
-            return base
-        }
-        return adjusted
+        nightDate
     }
 
     /// Convert to the in-memory SleepDay struct for use with existing graph views.

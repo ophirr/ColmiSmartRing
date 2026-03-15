@@ -14,7 +14,7 @@ struct HomeScreenView: View {
 
     private var todayHeartRateAverage: Int? {
         guard let log = storedHeartRateLogs.first else { return nil }
-        let withTimes = (try? log.toHeartRateLog().heartRatesWithTimes()) ?? []
+        let withTimes = log.toHeartRateLog().heartRatesWithTimes()
         let valid = withTimes.map(\.0).filter { $0 > 0 }
         guard !valid.isEmpty else { return nil }
         return valid.reduce(0, +) / valid.count
