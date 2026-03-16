@@ -128,10 +128,11 @@ final class StoredHeartRateLog {
     }
 
     /// Convert to HeartRateLog for use with heartRatesWithTimes() and UI.
+    /// Uses `dayStart` (canonical local-timezone date) so the time axis matches the selected day.
     func toHeartRateLog() -> HeartRateLog {
         HeartRateLog(
             heartRates: heartRates,
-            timestamp: timestamp,
+            timestamp: dayStart,
             size: size,
             index: index,
             range: range

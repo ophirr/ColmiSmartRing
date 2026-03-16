@@ -92,7 +92,8 @@ struct HeartRateSectionView: View {
     }
 
     private func saveHeartRateLog(_ log: HeartRateLog) {
-        let dayStart = Calendar.current.startOfDay(for: log.timestamp)
+        // Use local today as canonical dayStart (ring timestamp may be UTC-shifted).
+        let dayStart = Calendar.current.startOfDay(for: Date.now)
         let descriptor = FetchDescriptor<StoredHeartRateLog>(
             predicate: #Predicate<StoredHeartRateLog> { $0.dayStart == dayStart }
         )
@@ -106,6 +107,7 @@ struct HeartRateSectionView: View {
             action = "UPDATE"
         } else {
             let stored = StoredHeartRateLog.from(log)
+            stored.dayStart = dayStart
             modelContext.insert(stored)
             action = "INSERT"
         }

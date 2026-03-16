@@ -305,6 +305,9 @@ class RingSessionManager: NSObject {
 
     var batteryStatusCallback: ((BatteryInfo) -> Void)?
     var heartRateLogCallback: ((HeartRateLog) -> Void)?
+    /// FIFO queue of requested day-starts — one per in-flight HR log request.
+    /// Responses arrive in the same order as requests, so we dequeue from the front.
+    private var heartRateLogRequestedDays: [Date] = []
     /// Called with each raw sleep response packet (16 bytes) for debugging / future parsing
     var sleepPacketCallback: (([UInt8]) -> Void)?
     /// Called when sleep data (command 68) is received; dayOffset is the requested day (0 = today).
@@ -330,7 +333,8 @@ class RingSessionManager: NSObject {
     /// Always-on callback intended for persistence layer for activity packets.
     var activityDataPacketPersistenceCallback: (([UInt8]) -> Void)?
     /// Always-on callback intended for persistence layer when a heart-rate log is parsed.
-    var heartRateLogPersistenceCallback: ((HeartRateLog) -> Void)?
+    /// Second parameter is the requested day-start (canonical date for storage/dedup).
+    var heartRateLogPersistenceCallback: ((HeartRateLog, Date) -> Void)?
     /// Called when the ring is connected and UART characteristics are ready; use this to trigger tracking-settings reads.
     var onReadyForSettingsQuery: (() -> Void)?
     /// HR log interval reported by the ring (minutes). nil = not yet queried.
@@ -1316,36 +1320,36 @@ extension RingSessionManager {
             }
             self.syncSleep(dayOffset: 0)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            guard let self, !self.isWorkoutActive else {
-                tLog("[SyncOnConnect] Workout active — skipping HR log sync")
-                return
+        // Fetch a full week of HR logs (days 0–6) so the week view is populated.
+        // Each request is enqueued; BLE responses are serialised by the ring.
+        for day in 0...6 {
+            let delay = 1.2 + Double(day) * 0.6
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, !self.isWorkoutActive else {
+                    if day == 0 { tLog("[SyncOnConnect] Workout active — skipping HR log sync") }
+                    return
+                }
+                self.getHeartRateLog(dayOffset: day) { _ in }
             }
-            self.getHeartRateLog(dayOffset: 0) { _ in }
         }
-        // Fetch yesterday's HR log too — overnight readings before midnight
-        // land on the previous day's log and would otherwise be missed.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
-            guard let self, !self.isWorkoutActive else { return }
-            self.getHeartRateLog(dayOffset: 1) { _ in }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
+        // Other metrics start after HR logs (7 × 0.6 = 4.2s offset from 1.2 base = 5.4s)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.4) { [weak self] in
             guard let self, !self.isWorkoutActive else { return }
             self.syncHRVData(dayOffset: 0)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
             guard let self, !self.isWorkoutActive else { return }
             self.syncBloodOxygen(dayOffset: 0)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.6) { [weak self] in
             guard let self, !self.isWorkoutActive else { return }
             self.syncPressureData(dayOffset: 0)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 7.2) { [weak self] in
             guard let self, !self.isWorkoutActive else { return }
             self.syncActivityData(dayOffset: 0)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4.8) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 7.8) { [weak self] in
             guard let self else { return }
             Task { @MainActor in
                 await self.ensureHRLogSettings()
@@ -2353,7 +2357,13 @@ extension RingSessionManager {
             let data = Data(packet)
             peripheral.writeValue(data, for: uartRxCharacteristic, type: .withResponse)
 
-            tLog("HRL Command Sent (dayOffset: \(dayOffset))")
+            // Enqueue the local-timezone day-start so persistence uses the correct calendar date.
+            // Responses arrive in request order, so handleHeartRateLogResponse dequeues from front.
+            let localDayStart = Calendar.current.startOfDay(
+                for: Calendar.current.date(byAdding: .day, value: -dayOffset, to: Date.now) ?? Date.now
+            )
+            self.heartRateLogRequestedDays.append(localDayStart)
+            tLog("HRL Command Sent (dayOffset: \(dayOffset), requestedDay: \(localDayStart), queue=\(heartRateLogRequestedDays.count))")
 
             // Store completion handler to call when data is received
             self.heartRateLogCallback = completion
@@ -2361,17 +2371,26 @@ extension RingSessionManager {
             tLog("Failed to create hrl packet: \(error)")
         }
     }
-    
+
     private func handleHeartRateLogResponse(packet: [UInt8]) {
         guard packet[0] == RingSessionManager.CMD_READ_HEART_RATE else {
             tLog("Invalid heart rate log packet received.")
             return
         }
-        
+
         guard let log = hrp.parse(packet: packet) as? HeartRateLog else {
             return
         }
-        heartRateLogPersistenceCallback?(log)
+        // Dequeue the requested day from the FIFO (matches request order).
+        let requestedDay: Date
+        if !heartRateLogRequestedDays.isEmpty {
+            requestedDay = heartRateLogRequestedDays.removeFirst()
+        } else {
+            requestedDay = Calendar.current.startOfDay(for: log.timestamp)
+            tLog("[HRL] WARNING: No queued requestedDay — falling back to ring timestamp")
+        }
+        tLog("[HRL] Parsed log: ringTimestamp=\(log.timestamp) requestedDay=\(requestedDay) queueRemaining=\(heartRateLogRequestedDays.count)")
+        heartRateLogPersistenceCallback?(log, requestedDay)
         heartRateLogCallback?(log)
         heartRateLogCallback = nil
     }

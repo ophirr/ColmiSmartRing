@@ -31,13 +31,18 @@ final class RingDataPersistenceCoordinator {
         // Backfill nightDate for sleep records migrated from schema without it.
         backfillSleepNightDates()
 
+        // One-time: purge HR logs that were stored with wrong dayStart due to
+        // the race condition bug (single requestedDay variable overwritten by
+        // concurrent requests). Next sync will re-populate with correct dates.
+        purgeStaleHeartRateLogs()
+
         ringSessionManager.bigDataSleepPersistenceCallback = { [weak self] sleepData in
             guard let self else { return }
             self.persistSleepData(sleepData)
         }
-        ringSessionManager.heartRateLogPersistenceCallback = { [weak self] heartRateLog in
+        ringSessionManager.heartRateLogPersistenceCallback = { [weak self] heartRateLog, requestedDay in
             guard let self else { return }
-            self.persistHeartRateLog(heartRateLog)
+            self.persistHeartRateLog(heartRateLog, requestedDay: requestedDay)
         }
         ringSessionManager.activityDataPacketPersistenceCallback = { [weak self] packet in
             guard let self else { return }
@@ -154,8 +159,14 @@ final class RingDataPersistenceCoordinator {
 
     // MARK: - Heart Rate
 
-    private func persistHeartRateLog(_ log: HeartRateLog) {
-        let dayStart = Calendar.current.startOfDay(for: log.timestamp)
+    private func persistHeartRateLog(_ log: HeartRateLog, requestedDay: Date) {
+        // Use the requested day (local timezone) for dedup, not the ring's UTC timestamp,
+        // which can map to a different calendar day due to timezone offset.
+        let dayStart = requestedDay
+        let ringDayStart = Calendar.current.startOfDay(for: log.timestamp)
+        if dayStart != ringDayStart {
+            tLog("[AutoPersist] HR dayStart mismatch: requested=\(formatDate(dayStart)) ring=\(formatDate(ringDayStart)) — using requested")
+        }
         let descriptor = FetchDescriptor<StoredHeartRateLog>(
             predicate: #Predicate<StoredHeartRateLog> { $0.dayStart == dayStart }
         )
@@ -168,7 +179,9 @@ final class RingDataPersistenceCoordinator {
             existing.range = log.range
             action = "UPDATE"
         } else {
-            modelContext.insert(StoredHeartRateLog.from(log))
+            let stored = StoredHeartRateLog.from(log)
+            stored.dayStart = dayStart   // Override with requested day
+            modelContext.insert(stored)
             action = "INSERT"
         }
 
@@ -189,6 +202,25 @@ final class RingDataPersistenceCoordinator {
     /// Delete all StoredActivitySample rows — the old parser stored every sample
     /// with today's date regardless of actual date, so the DB is unreliable.
     /// The next ring sync will repopulate with correctly-dated data.
+    private func purgeStaleHeartRateLogs() {
+        let key = "hrLogDayStartRacePurged"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+
+        do {
+            let all = try modelContext.fetch(FetchDescriptor<StoredHeartRateLog>())
+            guard !all.isEmpty else {
+                UserDefaults.standard.set(true, forKey: key)
+                return
+            }
+            for log in all { modelContext.delete(log) }
+            try modelContext.save()
+            tLog("[HRLogMigration] Purged \(all.count) stale HR logs (dayStart race fix)")
+        } catch {
+            tLog("[HRLogMigration] Purge failed: \(error)")
+        }
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
     private func purgeStaleActivitySamples() {
         let key = "activityParserV4Migrated"
         guard !UserDefaults.standard.bool(forKey: key) else { return }
