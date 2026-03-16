@@ -82,6 +82,15 @@ struct GymScreenView: View {
             .sheet(isPresented: $showingHistory) {
                 GymHistoryView()
             }
+            .alert("Save Workout?", isPresented: $showingSaveConfirm) {
+                Button("Save") { saveWorkout() }
+                Button("Discard", role: .destructive) { completedWorkout = nil }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                if let w = completedWorkout {
+                    Text("\(w.samples.count) HR samples over \(formatDuration(w.durationSeconds))\nAvg: \(w.avgBPM) BPM  Peak: \(w.peakBPM) BPM")
+                }
+            }
         }
     }
 
@@ -263,15 +272,6 @@ struct GymScreenView: View {
                 }
             }
             .padding(.vertical, 20)
-        }
-        .alert("Save Workout?", isPresented: $showingSaveConfirm) {
-            Button("Save") { saveWorkout() }
-            Button("Discard", role: .destructive) { completedWorkout = nil }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            if let w = completedWorkout {
-                Text("\(w.samples.count) HR samples over \(formatDuration(w.durationSeconds))\nAvg: \(w.avgBPM) BPM  Peak: \(w.peakBPM) BPM")
-            }
         }
     }
 

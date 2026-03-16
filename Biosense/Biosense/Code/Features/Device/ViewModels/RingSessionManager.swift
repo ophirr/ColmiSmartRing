@@ -2394,9 +2394,11 @@ extension RingSessionManager {
 // MARK: - Heart Rate Log
 
 extension RingSessionManager {
-    private func dayStartInPreferredTimeZone(for base: Date = Date(), dayOffset: Int = 0) -> Date? {
-        var calendar = Calendar.current
-        calendar.timeZone = preferredDataTimeZone
+    /// The ring clock is set to UTC, so its internal "day" runs midnight-to-midnight UTC.
+    /// We must request HR logs using UTC day boundaries so the ring returns the correct data.
+    private func dayStartInUTC(for base: Date = Date(), dayOffset: Int = 0) -> Date? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
         let start = calendar.startOfDay(for: base)
         guard dayOffset != 0 else { return start }
         return calendar.date(byAdding: .day, value: -dayOffset, to: start)
@@ -2409,20 +2411,20 @@ extension RingSessionManager {
         }
 
         do {
-            guard let target = dayStartInPreferredTimeZone(for: Date.now, dayOffset: dayOffset) else {
+            // Request using UTC midnight — ring clock is UTC so its day boundaries are UTC.
+            guard let target = dayStartInUTC(for: Date.now, dayOffset: dayOffset) else {
                 return
             }
             let packet = try readHeartRatePacket(for: target)
             let data = Data(packet)
             peripheral.writeValue(data, for: uartRxCharacteristic, type: .withResponse)
 
-            // Enqueue the local-timezone day-start so persistence uses the correct calendar date.
-            // Responses arrive in request order, so handleHeartRateLogResponse dequeues from front.
+            // Enqueue the LOCAL-timezone day-start for persistence/UI (user sees local calendar days).
             let localDayStart = Calendar.current.startOfDay(
                 for: Calendar.current.date(byAdding: .day, value: -dayOffset, to: Date.now) ?? Date.now
             )
             self.heartRateLogRequestedDays.append(localDayStart)
-            tLog("HRL Command Sent (dayOffset: \(dayOffset), requestedDay: \(localDayStart), queue=\(heartRateLogRequestedDays.count))")
+            tLog("HRL Command Sent (dayOffset: \(dayOffset), utcTarget: \(target), localDay: \(localDayStart), queue=\(heartRateLogRequestedDays.count))")
 
             // Store completion handler to call when data is received
             self.heartRateLogCallback = completion
@@ -2439,16 +2441,24 @@ extension RingSessionManager {
 
         let parsed = hrp.parse(packet: packet)
 
-        // Always dequeue the FIFO — even when the ring returns NoData (subType 0xFF),
-        // otherwise the queue drifts and subsequent valid responses get the wrong day.
-        guard let log = parsed as? HeartRateLog else {
+        // parse() returns:
+        //   nil       → intermediate packet (multi-packet log still assembling) — do NOT dequeue
+        //   NoData    → ring has no data for this day (subType 0xFF) — dequeue & skip
+        //   HeartRateLog → complete log assembled — dequeue & persist
+        if parsed is NoData {
             if !heartRateLogRequestedDays.isEmpty {
                 let skipped = heartRateLogRequestedDays.removeFirst()
                 tLog("[HRL] No data from ring — dequeued \(skipped), queueRemaining=\(heartRateLogRequestedDays.count)")
             }
             return
         }
-        // Dequeue the requested day from the FIFO (matches request order).
+
+        guard let log = parsed as? HeartRateLog else {
+            // Intermediate packet — still assembling, don't dequeue
+            return
+        }
+
+        // Complete log — dequeue the requested day from the FIFO (matches request order).
         let requestedDay: Date
         if !heartRateLogRequestedDays.isEmpty {
             requestedDay = heartRateLogRequestedDays.removeFirst()
@@ -2456,7 +2466,7 @@ extension RingSessionManager {
             requestedDay = Calendar.current.startOfDay(for: log.timestamp)
             tLog("[HRL] WARNING: No queued requestedDay — falling back to ring timestamp")
         }
-        tLog("[HRL] Parsed log: ringTimestamp=\(log.timestamp) requestedDay=\(requestedDay) queueRemaining=\(heartRateLogRequestedDays.count)")
+        tLog("[HRL] Parsed log: ringTimestamp=\(log.timestamp) requestedDay=\(requestedDay) range=\(log.range)min nonZero=\(log.heartRates.filter { $0 > 0 }.count) queueRemaining=\(heartRateLogRequestedDays.count)")
         heartRateLogPersistenceCallback?(log, requestedDay)
         heartRateLogCallback?(log)
         heartRateLogCallback = nil

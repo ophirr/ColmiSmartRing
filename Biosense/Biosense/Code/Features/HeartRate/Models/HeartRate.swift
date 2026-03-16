@@ -280,13 +280,8 @@ class HeartRateLogParser {
         } else if hr.count < expectedCount {
             hr.append(contentsOf: Array(repeating: 0, count: expectedCount - hr.count))
         }
-
-        if isToday() {
-            let minutesElapsed = (Calendar.current.dateComponents([.minute], from: Calendar.current.startOfDay(for: Date()), to: Date()).minute ?? 0) / effectiveRange
-            for i in minutesElapsed..<hr.count {
-                hr[i] = 0
-            }
-        }
+        // NOTE: "today" zeroing of future slots is handled in toHeartRateLog()
+        // after UTC→local rotation, so the correct local-time slots are zeroed.
         return hr
     }
 }

@@ -128,10 +128,42 @@ final class StoredHeartRateLog {
     }
 
     /// Convert to HeartRateLog for use with heartRatesWithTimes() and UI.
-    /// Uses `dayStart` (canonical local-timezone date) so the time axis matches the selected day.
+    /// The ring stores data in UTC-indexed slots (slot 0 = 00:00 UTC), but the chart
+    /// anchors at local midnight. We rotate the array by the UTC offset so that
+    /// e.g. UTC slot 216 (18:00 UTC = 11:00 PDT) displays at the 11:00 position.
     func toHeartRateLog() -> HeartRateLog {
-        HeartRateLog(
-            heartRates: heartRates,
+        let effectiveRange = max(range, 1)
+        let slotsPerDay = (24 * 60) / effectiveRange  // 288 at 5-min, 1440 at 1-min
+
+        // UTC offset in seconds (positive = east of UTC, negative = west).
+        // For PDT (UTC-7): offsetSeconds = -25200 → shift = -84 slots → rotate right by 84
+        let offsetSeconds = TimeZone.current.secondsFromGMT(for: dayStart)
+        let shiftSlots = offsetSeconds / (effectiveRange * 60)
+
+        var shifted = heartRates
+        if shiftSlots != 0 && shifted.count >= slotsPerDay {
+            // Ensure we work with exactly slotsPerDay entries
+            shifted = Array(shifted.prefix(slotsPerDay))
+            // Rotate: positive shift moves data forward (east of UTC), negative moves back (west)
+            let normalizedShift = ((shiftSlots % slotsPerDay) + slotsPerDay) % slotsPerDay
+            if normalizedShift > 0 {
+                let tail = Array(shifted.suffix(normalizedShift))
+                let head = Array(shifted.prefix(shifted.count - normalizedShift))
+                shifted = tail + head
+            }
+        }
+
+        // Zero out future slots for today so the chart doesn't show stale/zero data ahead of now.
+        if Calendar.current.isDateInToday(dayStart) {
+            let totalMinutes = Int(Date().timeIntervalSince(Calendar.current.startOfDay(for: Date())) / 60)
+            let slotsElapsed = totalMinutes / effectiveRange
+            for i in slotsElapsed..<shifted.count {
+                shifted[i] = 0
+            }
+        }
+
+        return HeartRateLog(
+            heartRates: shifted,
             timestamp: dayStart,
             size: size,
             index: index,
