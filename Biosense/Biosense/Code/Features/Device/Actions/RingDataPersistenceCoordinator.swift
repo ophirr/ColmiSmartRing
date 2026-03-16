@@ -309,19 +309,28 @@ final class RingDataPersistenceCoordinator {
         let hex = packet.map { String(format: "%02X", $0) }.joined(separator: " ")
         tLog("[Activity] Raw packet (\(packet.count)B): \(hex)")
 
-        // --- Handle first-packet special cases ---
+        // --- Handle special packet types (detect regardless of index state) ---
+        // The version header (0xF0) and no-data marker (0xFF) always signal the
+        // start of a new response sequence.  Recognise them even if a previous
+        // sync was interrupted and activityPacketIndex is non-zero.
 
-        if activityPacketIndex == 0 && packet[1] == 0xFF {
+        if packet[1] == 0xFF {
+            if activityPacketIndex != 0 {
+                tLog("[Activity] ⚠️ no-data marker received with stale index \(activityPacketIndex) — resetting")
+            }
             tLog("[Activity] Ring reports no data for this day")
             activityPacketIndex = 0
             activityNewCalorieProtocol = false
             return
         }
 
-        if activityPacketIndex == 0 && packet[1] == 0xF0 {
+        if packet[1] == 0xF0 {
+            if activityPacketIndex != 0 {
+                tLog("[Activity] ⚠️ version header received with stale index \(activityPacketIndex) — resetting (previous sync likely interrupted)")
+            }
             // Protocol version header — not a data packet
             activityNewCalorieProtocol = (packet[3] == 1)
-            activityPacketIndex += 1
+            activityPacketIndex = 1
             tLog("[Activity] Version header: newCalorieProtocol=\(activityNewCalorieProtocol)")
             return
         }

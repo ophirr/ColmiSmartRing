@@ -6,6 +6,8 @@
 	<string>Biosense reads workout and heart rate data to avoid duplicates.</string>
 	<key>NSHealthUpdateUsageDescription</key>
 	<string>Biosense writes your sleep, activity, and workout data to Apple Health.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
