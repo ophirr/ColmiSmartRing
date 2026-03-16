@@ -252,6 +252,7 @@ class RingSessionManager: NSObject {
     private static let deviceHardwareUUID = SmartRingBLE.hardwareRevisionCharUUID
     private static let deviceFirmwareUUID = SmartRingBLE.firmwareRevisionCharUUID
 
+    private static let CMD_SET_DEVICE_TIME: UInt8 = 0x01
     private static let CMD_BLINK_TWICE: UInt8 = 16 // 0x10
     private static let CMD_BATTERY: UInt8 = 3
     private static let CMD_READ_HEART_RATE: UInt8 = 21  // 0x15
@@ -884,6 +885,13 @@ extension RingSessionManager: CBPeripheralDelegate {
         }
         
         switch packet[0] {
+        case RingSessionManager.CMD_SET_DEVICE_TIME:
+            // Response to time sync — byte[1]: 0=success, else error
+            if packet.count >= 2 && packet[1] == 0 {
+                tLog("[SyncTime] Ring acknowledged time sync OK")
+            } else {
+                tLog("[SyncTime] Ring time sync response: \(packet.prefix(4).map { String(format: "%02x", $0) }.joined(separator: " "))")
+            }
         case RingSessionManager.CMD_BATTERY:
             handleBatteryResponse(packet: packet)
         case RingSessionManager.CMD_READ_HEART_RATE:
@@ -1293,6 +1301,11 @@ extension RingSessionManager {
             return
         }
 
+        // Set the ring's clock FIRST — without a valid time the ring can't
+        // bucket activity, HR log, sleep, or HRV data into correct day slots.
+        // The firmware resets on its midnight reboot, so we re-sync every connect.
+        syncDeviceTime()
+
         // Kill any leftover real-time streams from a previous session.
         // The ring may still be streaming SpO2/HR/temp if the app was
         // backgrounded or disconnected without sending a stop command.
@@ -1578,6 +1591,52 @@ extension RingSessionManager {
             tLog("Pressure data requested (Commands 55, dayOffset/index: \(dayOffset))")
         } catch {
             tLog("Failed to create pressure packet: \(error)")
+        }
+    }
+
+    // MARK: - Device Time Sync
+
+    /// Convert a decimal value to BCD (Binary-Coded Decimal).
+    /// e.g. 26 → 0x26 (0010_0110), 3 → 0x03, 59 → 0x59.
+    private static func toBCD(_ value: Int) -> UInt8 {
+        let tens = (value / 10) & 0x0F
+        let ones = (value % 10) & 0x0F
+        return UInt8((tens << 4) | ones)
+    }
+
+    /// Sync the ring's clock to the phone's current UTC time.
+    /// The ring uses this clock to timestamp HR logs, activity/step data, and sleep.
+    /// Without a valid clock, the ring returns 0xFF (no data) for historical queries.
+    ///
+    /// Packet format (CMD 0x01): [year-2000, month, day, hour, minute, second, language]
+    /// All time fields are BCD-encoded. Language: 1 = English, 0 = Chinese.
+    func syncDeviceTime() {
+        let now = Date()
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let comps = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: now)
+
+        let year = (comps.year ?? 2026) - 2000
+        let month = comps.month ?? 1
+        let day = comps.day ?? 1
+        let hour = comps.hour ?? 0
+        let minute = comps.minute ?? 0
+        let second = comps.second ?? 0
+
+        do {
+            let packet = try makePacket(command: Self.CMD_SET_DEVICE_TIME, subData: [
+                Self.toBCD(year),
+                Self.toBCD(month),
+                Self.toBCD(day),
+                Self.toBCD(hour),
+                Self.toBCD(minute),
+                Self.toBCD(second),
+                0x01  // language: English
+            ])
+            sendPacket(packet: packet)
+            tLog("[SyncTime] Sent device time: \(String(format: "%04d-%02d-%02dT%02d:%02d:%02dZ", year + 2000, month, day, hour, minute, second))")
+        } catch {
+            tLog("[SyncTime] Failed to create time packet: \(error)")
         }
     }
 
@@ -2378,7 +2437,15 @@ extension RingSessionManager {
             return
         }
 
-        guard let log = hrp.parse(packet: packet) as? HeartRateLog else {
+        let parsed = hrp.parse(packet: packet)
+
+        // Always dequeue the FIFO — even when the ring returns NoData (subType 0xFF),
+        // otherwise the queue drifts and subsequent valid responses get the wrong day.
+        guard let log = parsed as? HeartRateLog else {
+            if !heartRateLogRequestedDays.isEmpty {
+                let skipped = heartRateLogRequestedDays.removeFirst()
+                tLog("[HRL] No data from ring — dequeued \(skipped), queueRemaining=\(heartRateLogRequestedDays.count)")
+            }
             return
         }
         // Dequeue the requested day from the FIFO (matches request order).

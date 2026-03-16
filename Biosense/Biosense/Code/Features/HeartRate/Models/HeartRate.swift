@@ -203,7 +203,7 @@ class HeartRateLogParser {
         allPackets += packet
         
         if subType == 255 {
-            tLog("Error: Invalid response from heart rate log request")
+            tLog("[HRL] Ring returned no data for this day (subType=0xFF)")
             reset()
             return NoData()
         }
