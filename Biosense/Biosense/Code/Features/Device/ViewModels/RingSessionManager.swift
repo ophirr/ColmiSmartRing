@@ -822,219 +822,111 @@ extension RingSessionManager: CBPeripheralDelegate {
             appendToDebugLog(direction: .received, bytes: packet)
         }
         
-        switch packet[0] {
-        case CMD.cmdSetDeviceTime:
-            // Response to time sync — byte[1]: 0=success, else error
-            if packet.count >= 2 && packet[1] == 0 {
-                tLog("[SyncTime] Ring acknowledged time sync OK")
+        switch RingPacketDispatcher.dispatch(packet) {
+
+        // MARK: Real-time HR (0x69)
+        case .heartRateReading(let bpm, let timestamp):
+            lastRealTimeHRPacketTime = timestamp
+            if spotCheckActive && spotCheckType == .realtimeHeartRate {
+                spotCheckHRReadings.append(bpm)
+                tLog("[SpotCheck] HR sample \(spotCheckHRReadings.count): \(bpm) bpm")
             } else {
-                tLog("[SyncTime] Ring time sync response: \(packet.prefix(4).map { String(format: "%02x", $0) }.joined(separator: " "))")
+                realTimeHeartRateBPM = bpm
+                throttledInfluxHRWrite(bpm: bpm, at: timestamp)
             }
-        case CMD.cmdBattery:
-            handleBatteryResponse(packet: packet)
-        case CMD.cmdReadHeartRate:
-            handleHeartRateLogResponse(packet: packet)
-        case CMD.cmdHRTimingMonitor:
-            trackingSettings.handleHRTimingMonitorResponse(packet: packet)
-        case Counter.shared.CMD_X:
+
+        case .heartRateZero(let timestamp):
+            lastRealTimeHRPacketTime = timestamp
+            if isWorkoutActive { realTimeHeartRateBPM = nil }
+
+        case .heartRateOutOfRange(let value, let timestamp):
+            lastRealTimeHRPacketTime = timestamp
+            tLog("[RealTime] Ignoring out-of-range HR: \(value)")
+
+        // MARK: Real-time SpO2 (0x69)
+        case .spo2Reading(let percent, let timestamp):
+            realTimeBloodOxygenPercent = percent
+            if spotCheckActive && spotCheckType == .spo2 {
+                tLog("[SpotCheck] Got SpO2 \(percent)% — writing to InfluxDB/HealthKit/SwiftData and stopping stream")
+                lastInfluxSpO2Write = timestamp
+                Task { @MainActor in
+                    InfluxDBWriter.shared.writeSpO2(value: Double(percent), time: timestamp)
+                    await self.healthHRWriter.writeSpO2(percent: percent, time: timestamp)
+                }
+                spotCheckSpO2PersistenceCallback?(percent, timestamp)
+                finishSpotCheck()
+            } else {
+                throttledInfluxSpO2Write(percent: percent, at: timestamp)
+            }
+
+        case .spo2OutOfRange(let value):
+            tLog("[SpO2] Discarding out-of-range value: \(value)%")
+
+        // MARK: Real-time temperature (0x69)
+        case .temperatureReading(let celsius, let timestamp):
+            tLog("[RealTime] Temp → \(String(format: "%.1f", celsius))°C")
+            spotCheckTempReadings.append(celsius)
+            guard celsius >= RingConstants.bodyTempRangeMin && celsius <= RingConstants.bodyTempRangeMax else { break }
+            realTimeTemperatureCelsius = celsius
+            guard !spotCheckActive else { break }
+            throttledInfluxTempWrite(celsius: celsius, at: timestamp)
+
+        case .readingError(let type, let errorCode):
+            tLog("Error in reading - Type: \(type), Error Code: \(errorCode)")
+
+        // MARK: RT HR via command 30 (0x1E)
+        case .rtHR(let bpm, let timestamp):
+            lastRealTimeHRPacketTime = timestamp
+            realTimeHeartRateBPM = bpm
+            tLog("[RT-HR30] heartRate=\(bpm)")
+            throttledInfluxHRWrite(bpm: bpm, at: timestamp)
+
+        case .rtHRZero(let timestamp):
+            lastRealTimeHRPacketTime = timestamp
+            if isWorkoutActive { realTimeHeartRateBPM = nil }
+            tLog("[RT-HR30] heartRate=0 (warmup)")
+
+        case .rtHROutOfRange(let value):
+            tLog("[RT-HR30] Ignoring out-of-range HR: \(value)")
+
+        // MARK: Stop / pathway notifications
+        case .hrAutoStop:
+            if isWorkoutActive || isContinuousHRStreamActive {
+                tLog("[RealTime] Ring auto-stopped stream — restarting (\(isWorkoutActive ? "workout" : "continuous"))")
+                startRealTimeStreaming(type: .realtimeHeartRate)
+            } else {
+                tLog("[RealTime] Stream stopped (0x6A)")
+                realTimeHeartRateBPM = nil
+            }
+
+        case .spo2StopPathwayData(let percent):
+            tLog("[SpO2] Response on 0x6A — value=\(percent)")
+            realTimeBloodOxygenPercent = percent
+
+        case .spo2StopNotification(let pkt):
+            tLog("[SpO2] Stop notification (0x6B) — pkt=\(pkt.prefix(4).map { String(format: "%02x", $0) }.joined(separator: " "))")
+
+        // MARK: Data responses (delegate to existing handlers)
+        case .batteryResponse(let pkt):         handleBatteryResponse(packet: pkt)
+        case .heartRateLogResponse(let pkt):    handleHeartRateLogResponse(packet: pkt)
+        case .hrTimingMonitorResponse(let pkt):  trackingSettings.handleHRTimingMonitorResponse(packet: pkt)
+        case .sleepDataResponse(let pkt):       handleSleepDataResponse(packet: pkt)
+        case .sleepLegacyResponse(let pkt):     handleSleepResponse(packet: pkt)
+        case .hrvDataResponse(let pkt):         handleHRVDataResponse(packet: pkt)
+        case .pressureDataResponse(let pkt):    handlePressureDataResponse(packet: pkt)
+        case .activityDataResponse(let pkt):    handleActivityDataResponse(packet: pkt)
+        case .trackingSettingResponse(let pkt): trackingSettings.handleTrackingSettingResponse(packet: pkt)
+        case .sportRealTimeResponse(let pkt):   handleSportRealTimeResponse(packet: pkt)
+
+        // MARK: Misc
+        case .timeSyncAck(let success):
+            tLog(success ? "[SyncTime] Ring acknowledged time sync OK" : "[SyncTime] Ring time sync response: \(packet.prefix(4).map { String(format: "%02x", $0) }.joined(separator: " "))")
+        case .counterX:
             tLog("🔥")
-        case CMD.cmdStartRealTime:
-            guard packet.count >= 4 else {
-                tLog("Real-time response packet too short: \(packet)")
-                break
-            }
-            guard let readingType = RealTimeReading(rawValue: packet[1]) else {
-                tLog("Real-Time Reading - Unknown sub-type: \(packet[1]) – full packet: \(packet)")
-                break
-            }
-            let errorCode = packet[2]
-
-            if errorCode == 0 {
-                let readingValue = packet[3]
-                let now = Date()
-
-                switch readingType {
-                case .heartRate, .realtimeHeartRate:
-                    // Stamp every HR packet (including zeros) so the gym
-                    // watchdog can distinguish "stream alive but warming up"
-                    // from "stream has gone silent".
-                    lastRealTimeHRPacketTime = now
-
-                    if readingValue == 0 {
-                        // Zero = sensor warmup / no skin contact.
-                        // During a workout, nil-out so the gym UI shows the
-                        // warmup indicator instead of a frozen stale value.
-                        if isWorkoutActive { realTimeHeartRateBPM = nil }
-                        break
-                    }
-                    // Sanity-check: discard physiologically impossible values.
-                    // 0xFF (255) is a known firmware artefact; valid resting-to-max
-                    // range is roughly 30-220 BPM.  Values like 1-2 bpm are sensor
-                    // noise during warmup — not real heart rates.
-                    guard readingValue >= RingConstants.validBPMMin && readingValue <= RingConstants.validBPMMax else {
-                        tLog("[RealTime] Ignoring out-of-range HR: \(readingValue)")
-                        break
-                    }
-
-                    // Spot-check: collect readings — don't stop early.
-                    // The VC30F PPG sensor's first readings after a cold start
-                    // are often elevated (warmup artefact).  We let the full
-                    // timeout run and take the median at the end.
-                    if spotCheckActive && spotCheckType == .realtimeHeartRate {
-                        spotCheckHRReadings.append(Int(readingValue))
-                        tLog("[SpotCheck] HR sample \(spotCheckHRReadings.count): \(readingValue) bpm")
-                        break
-                    }
-
-                    realTimeHeartRateBPM = Int(readingValue)
-
-                    if now.timeIntervalSince(lastInfluxHRWrite) >= currentInfluxWriteInterval {
-                        lastInfluxHRWrite = now
-                        Task { @MainActor in
-                            InfluxDBWriter.shared.writeHeartRates([(bpm: Int(readingValue), time: now)])
-                        }
-                    }
-                case .spo2:
-                    tLog("[SpO2] Response on 0x69 — value=\(readingValue) error=\(errorCode) pkt=\(packet.prefix(6).map { String(format: "%02x", $0) }.joined(separator: " "))")
-                    guard readingValue >= RingConstants.spo2RangeMin, readingValue <= RingConstants.spo2RangeMax else {
-                        tLog("[SpO2] Discarding out-of-range value: \(readingValue)%")
-                        break
-                    }
-                    realTimeBloodOxygenPercent = Int(readingValue)
-
-                    // Spot-check: got a valid SpO2 reading — write to InfluxDB/HealthKit/SwiftData and stop.
-                    if spotCheckActive && spotCheckType == .spo2 {
-                        tLog("[SpotCheck] Got SpO2 \(readingValue)% — writing to InfluxDB/HealthKit/SwiftData and stopping stream")
-                        lastInfluxSpO2Write = now
-                        let percent = Int(readingValue)
-                        Task { @MainActor in
-                            InfluxDBWriter.shared.writeSpO2(value: Double(percent), time: now)
-                            await self.healthHRWriter.writeSpO2(percent: percent, time: now)
-                        }
-                        spotCheckSpO2PersistenceCallback?(percent, now)
-                        finishSpotCheck()
-                        break
-                    }
-
-                    if now.timeIntervalSince(lastInfluxSpO2Write) >= currentInfluxWriteInterval {
-                        lastInfluxSpO2Write = now
-                        Task { @MainActor in
-                            InfluxDBWriter.shared.writeSpO2(value: Double(readingValue), time: now)
-                        }
-                    }
-                case .temperature:
-                    // Temperature uses a 16-bit LE value at bytes[6-7], not byte[3].
-                    // byte[3] is always 0 for temperature packets.
-                    // Raw 16-bit value / 20.0 = degrees Celsius.
-                    // e.g. raw 730 → 730 / 20.0 = 36.5 °C
-                    //
-                    // The ring sends uncalibrated sensor readings mid-stream
-                    // (often 50-57°C) that ramp toward the real value. Only
-                    // the final packet — typically sent right after the stop
-                    // command — contains the calibrated body temperature.
-                    // During a spot-check we therefore let the full timeout
-                    // run, then write the last reading if it is in range.
-                    guard packet.count >= 8 else { break }
-                    let rawTemp = Int(packet[6]) | (Int(packet[7]) << 8)
-                    guard rawTemp > 0 else { break }
-                    let celsius = Double(rawTemp) / RingConstants.tempRawDivisor
-                    tLog("[RealTime] Temp raw=\(rawTemp) → \(String(format: "%.1f", celsius))°C")
-
-                    // Stash every reading so the timeout handler can pick
-                    // the median of body-range values.
-                    spotCheckTempReadings.append(celsius)
-
-                    // For non-spot-check continuous streaming, only surface
-                    // calibrated values (35-38°C) to the UI / InfluxDB.
-                    guard celsius >= RingConstants.bodyTempRangeMin && celsius <= RingConstants.bodyTempRangeMax else { break }
-                    realTimeTemperatureCelsius = celsius
-
-                    // During a spot-check, do NOT stop early — let the full
-                    // timeout run so the ring can finish calibrating.
-                    guard !spotCheckActive else { break }
-
-                    if now.timeIntervalSince(lastInfluxTempWrite) >= currentInfluxWriteInterval {
-                        lastInfluxTempWrite = now
-                        Task { @MainActor in
-                            InfluxDBWriter.shared.writeTemperature(celsius: celsius, time: now)
-                        }
-                    }
-                default:
-                    break
-                }
-                tLog("Real-Time Reading - Type: \(readingType), Value: \(readingValue)")
-            } else {
-                tLog("Error in reading - Type: \(readingType), Error Code: \(errorCode)")
-            }
-        case CMD.cmdRealTimeHeartRate:
-            // Response to DataType=6 (realtimeHeartRate) streaming.
-            // Packet format: [30, heartRate, 0, ..., checksum]
-            let hrValue = packet[1]
-            let now = Date()
-            lastRealTimeHRPacketTime = now
-
-            if hrValue == 0 {
-                if isWorkoutActive { realTimeHeartRateBPM = nil }
-                tLog("[RT-HR30] heartRate=0 (warmup)")
-            } else if hrValue >= RingConstants.validBPMMin && hrValue <= RingConstants.validBPMMax {
-                realTimeHeartRateBPM = Int(hrValue)
-                tLog("[RT-HR30] heartRate=\(hrValue)")
-                if now.timeIntervalSince(lastInfluxHRWrite) >= currentInfluxWriteInterval {
-                    lastInfluxHRWrite = now
-                    Task { @MainActor in
-                        InfluxDBWriter.shared.writeHeartRates([(bpm: Int(hrValue), time: now)])
-                    }
-                }
-            } else {
-                tLog("[RT-HR30] Ignoring out-of-range HR: \(hrValue)")
-            }
-        case CMD.cmdStopRealTime:
-            // 0x6A serves double duty:
-            //   (a) HR auto-stop notification (Pathway B)
-            //   (b) Pathway A data response (SpO2 etc.) — packet[1]=DataType, packet[2]=error, packet[3]=value
-            if packet.count >= 4, let dataType = RealTimeReading(rawValue: packet[1]), dataType == .spo2 {
-                // Pathway A SpO2 data response
-                let errorCode = packet[2]
-                let value = packet[3]
-                tLog("[SpO2] Response on 0x6A — DataType=\(dataType) error=\(errorCode) value=\(value) pkt=\(packet.prefix(6).map { String(format: "%02x", $0) }.joined(separator: " "))")
-                if errorCode == 0 && value > 0 && value <= 100 {
-                    realTimeBloodOxygenPercent = Int(value)
-                }
-            } else {
-                // HR auto-stop notification
-                if isWorkoutActive || isContinuousHRStreamActive {
-                    tLog("[RealTime] Ring auto-stopped stream — restarting (\(isWorkoutActive ? "workout" : "continuous"))")
-                    startRealTimeStreaming(type: .realtimeHeartRate)
-                } else {
-                    tLog("[RealTime] Stream stopped (0x6A) — pkt=\(packet.prefix(4).map { String(format: "%02x", $0) }.joined(separator: " "))")
-                    realTimeHeartRateBPM = nil
-                }
-            }
-        case CMD.cmdPathwayAStop:  // 0x6B
-            tLog("[SpO2] Stop notification (0x6B) — pkt=\(packet.prefix(4).map { String(format: "%02x", $0) }.joined(separator: " "))")
-        case CMD.cmdSleepData:
-            handleSleepDataResponse(packet: packet)
-        case CMD.cmdSyncSleepLegacy:
-            handleSleepResponse(packet: packet)
-        case CMD.cmdReadHRVData:
-            handleHRVDataResponse(packet: packet)
-        case CMD.cmdReadPressureData:
-            handlePressureDataResponse(packet: packet)
-        case CMD.cmdReadActivityData:
-            handleActivityDataResponse(packet: packet)
-        case CMD.cmdHRVSetting,
-             CMD.cmdHeartRateSetting,
-             CMD.cmdBloodOxygen,
-             CMD.cmdPressureSetting:
-            trackingSettings.handleTrackingSettingResponse(packet: packet)
-        case CMD.cmdSportRealTime:
-            handleSportRealTimeResponse(packet: packet)
-        case CMD.cmdRealTimeHeartRateAck: // 0x9E — ack from CMD_REAL_TIME_HEART_RATE (30+128)
+        case .ack, .packetTooShort:
             break
-        default:
-            // Log unhandled opcodes so we can identify sleep/other response formats
-            tLog("Unhandled response opcode: \(packet[0]) (0x\(String(format: "%02x", packet[0]))) – full packet: \(packet)")
-            break
+        case .unhandled(let opcode, let pkt):
+            tLog("Unhandled response opcode: \(opcode) (0x\(String(format: "%02x", opcode))) – full packet: \(pkt)")
         }
         
         if characteristic.uuid == CBUUID(string: Self.uartTxCharacteristicUUID) {
@@ -1629,9 +1521,35 @@ extension RingSessionManager {
             tLog("Cannot send packet. Peripheral or characteristic not ready.")
             return
         }
-        
+
         let data = Data(packet)
         peripheral.writeValue(data, for: uartRxCharacteristic, type: .withResponse)
+    }
+
+    // MARK: - Throttled InfluxDB writes (called from packet dispatch)
+
+    private func throttledInfluxHRWrite(bpm: Int, at now: Date) {
+        guard now.timeIntervalSince(lastInfluxHRWrite) >= currentInfluxWriteInterval else { return }
+        lastInfluxHRWrite = now
+        Task { @MainActor in
+            InfluxDBWriter.shared.writeHeartRates([(bpm: bpm, time: now)])
+        }
+    }
+
+    private func throttledInfluxSpO2Write(percent: Int, at now: Date) {
+        guard now.timeIntervalSince(lastInfluxSpO2Write) >= currentInfluxWriteInterval else { return }
+        lastInfluxSpO2Write = now
+        Task { @MainActor in
+            InfluxDBWriter.shared.writeSpO2(value: Double(percent), time: now)
+        }
+    }
+
+    private func throttledInfluxTempWrite(celsius: Double, at now: Date) {
+        guard now.timeIntervalSince(lastInfluxTempWrite) >= currentInfluxWriteInterval else { return }
+        lastInfluxTempWrite = now
+        Task { @MainActor in
+            InfluxDBWriter.shared.writeTemperature(celsius: celsius, time: now)
+        }
     }
 }
 
