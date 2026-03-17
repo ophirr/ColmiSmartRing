@@ -203,7 +203,7 @@ final class RingDataPersistenceCoordinator {
     /// with today's date regardless of actual date, so the DB is unreliable.
     /// The next ring sync will repopulate with correctly-dated data.
     private func purgeStaleHeartRateLogs() {
-        let key = "hrLogDayStartRacePurged"
+        let key = "hrLogFifoFixPurgeV3"
         guard !UserDefaults.standard.bool(forKey: key) else { return }
 
         do {

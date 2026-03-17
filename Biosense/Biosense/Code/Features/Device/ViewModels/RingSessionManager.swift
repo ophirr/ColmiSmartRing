@@ -2473,15 +2473,20 @@ extension RingSessionManager {
             return
         }
 
-        // Complete log — dequeue the requested day from the FIFO (matches request order).
-        let requestedDay: Date
-        if !heartRateLogRequestedDays.isEmpty {
-            requestedDay = heartRateLogRequestedDays.removeFirst()
-        } else {
-            requestedDay = Calendar.current.startOfDay(for: log.timestamp)
-            tLog("[HRL] WARNING: No queued requestedDay — falling back to ring timestamp")
+        // Derive local day directly from the ring's UTC timestamp.
+        // The FIFO approach is fragile — if NoData responses shift the queue or
+        // responses arrive out of order, FIFO dequeue assigns the wrong day.
+        // The ring embeds a UTC timestamp in each log; converting to local gives
+        // the correct calendar day reliably.
+        let requestedDay = Calendar.current.startOfDay(for: log.timestamp)
+
+        // Still drain the FIFO to keep it in sync (best-effort), but don't use
+        // its value for persistence.
+        let fifoDay: Date? = heartRateLogRequestedDays.isEmpty ? nil : heartRateLogRequestedDays.removeFirst()
+        if let fifoDay, fifoDay != requestedDay {
+            tLog("[HRL] FIFO mismatch: fifo=\(fifoDay) vs ringDerived=\(requestedDay) — using ringDerived")
         }
-        tLog("[HRL] Parsed log: ringTimestamp=\(log.timestamp) requestedDay=\(requestedDay) range=\(log.range)min nonZero=\(log.heartRates.filter { $0 > 0 }.count) queueRemaining=\(heartRateLogRequestedDays.count)")
+        tLog("[HRL] Parsed log: ringTimestamp=\(log.timestamp) localDay=\(requestedDay) range=\(log.range)min nonZero=\(log.heartRates.filter { $0 > 0 }.count) queueRemaining=\(heartRateLogRequestedDays.count)")
         heartRateLogPersistenceCallback?(log, requestedDay)
         heartRateLogCallback?(log)
         heartRateLogCallback = nil
