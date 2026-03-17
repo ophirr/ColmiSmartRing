@@ -9,9 +9,9 @@ import Foundation
 import CoreBluetooth
 import SwiftUI
 
-private let savedRingIdentifierKey = "savedRingIdentifier"
-private let savedRingDisplayNameKey = "savedRingDisplayName"
-private let preferredDataTimeZoneIdentifierKey = "preferredDataTimeZoneIdentifier"
+private let savedRingIdentifierKey = AppSettings.Ring.savedIdentifier
+private let savedRingDisplayNameKey = AppSettings.Ring.savedDisplayName
+private let preferredDataTimeZoneIdentifierKey = AppSettings.Ring.preferredTimeZone
 
 @Observable
 class RingSessionManager: NSObject {
@@ -202,35 +202,14 @@ class RingSessionManager: NSObject {
     /// Keyed lookup avoids FIFO ordering fragility when NoData responses shift the queue.
     private var heartRateLogUTCToLocalDay: [Date: Date] = [:]
     /// Called with each raw sleep response packet (16 bytes) for debugging / future parsing
+    /// Delegate for persisting ring data. Set by RingDataPersistenceCoordinator.
+    weak var dataDelegate: RingDataDelegate?
+    /// Called with each raw sleep response packet (16 bytes) for debugging.
     var sleepPacketCallback: (([UInt8]) -> Void)?
     /// Called when sleep data (command 68) is received; dayOffset is the requested day (0 = today).
     var sleepDataCallback: ((SleepData) -> Void)?
-    /// Called when Big Data sleep (dataId 39) is received from Colmi service.
+    /// Called when Big Data sleep (dataId 39) is received from Colmi service (UI observer).
     var bigDataSleepCallback: ((BigDataSleepData) -> Void)?
-    /// Always-on callback intended for persistence layer when Big Data sleep is received.
-    var bigDataSleepPersistenceCallback: ((BigDataSleepData) -> Void)?
-    /// Called when Big Data blood oxygen payload (dataId 42) is received.
-    var bigDataBloodOxygenPayloadCallback: (([UInt8]) -> Void)?
-    /// Always-on callback intended for persistence layer when Big Data blood oxygen payload is received.
-    var bigDataBloodOxygenPayloadPersistenceCallback: (([UInt8]) -> Void)?
-    /// Called with each raw HRV data packet (command 57).
-    var hrvDataPacketCallback: (([UInt8]) -> Void)?
-    /// Always-on callback intended for persistence layer for HRV packets.
-    var hrvDataPacketPersistenceCallback: (([UInt8]) -> Void)?
-    /// Called with each raw pressure/stress data packet (command 55).
-    var pressureDataPacketCallback: (([UInt8]) -> Void)?
-    /// Always-on callback intended for persistence layer for pressure packets.
-    var pressureDataPacketPersistenceCallback: (([UInt8]) -> Void)?
-    /// Called with each raw activity data packet (command 67).
-    var activityDataPacketCallback: (([UInt8]) -> Void)?
-    /// Always-on callback intended for persistence layer for activity packets.
-    var activityDataPacketPersistenceCallback: (([UInt8]) -> Void)?
-    /// Always-on callback intended for persistence layer when a heart-rate log is parsed.
-    /// Second parameter is the requested day-start (canonical date for storage/dedup).
-    var heartRateLogPersistenceCallback: ((HeartRateLog, Date) -> Void)?
-    /// Called when a real-time SpO2 spot-check produces a valid reading (percent, timestamp).
-    /// Persistence layer should insert a StoredBloodOxygenSample so the value appears on the chart.
-    var spotCheckSpO2PersistenceCallback: ((Int, Date) -> Void)?
     /// Called when the ring is connected and UART characteristics are ready; use this to trigger tracking-settings reads.
     var onReadyForSettingsQuery: (() -> Void)?
     /// HR log interval reported by the ring (minutes). nil = not yet queried.
@@ -853,7 +832,7 @@ extension RingSessionManager: CBPeripheralDelegate {
                     InfluxDBWriter.shared.writeSpO2(value: Double(percent), time: timestamp)
                     await self.healthHRWriter.writeSpO2(percent: percent, time: timestamp)
                 }
-                spotCheckSpO2PersistenceCallback?(percent, timestamp)
+                dataDelegate?.ringDidReceiveSpotCheckSpO2(percent: percent, time: timestamp)
                 finishSpotCheck()
             } else {
                 throttledInfluxSpO2Write(percent: percent, at: timestamp)
@@ -1033,14 +1012,13 @@ extension RingSessionManager {
             if let sleepData = BigDataSleepParser.parseSleepPayload(payload) {
                 tLog("Big Data sleep received – \(sleepData.sleepDays) day(s)")
                 bigDataSleepCallback?(sleepData)
-                bigDataSleepPersistenceCallback?(sleepData)
+                dataDelegate?.ringDidReceiveSleepData(sleepData)
             } else {
                 tLog("Big Data sleep parse failed – payload length: \(payload.count)")
             }
         case CMD.bigDataBloodOxygenId:
             tLog("Big Data blood oxygen received – payload length: \(payload.count)")
-            bigDataBloodOxygenPayloadCallback?(payload)
-            bigDataBloodOxygenPayloadPersistenceCallback?(payload)
+            dataDelegate?.ringDidReceiveBloodOxygenPayload(payload)
         default:
             tLog("Big Data response – dataId: \(dataId), payload length: \(payload.count)")
         }
@@ -1195,7 +1173,7 @@ extension RingSessionManager {
     /// preference, write the preferred settings. This ensures HR logging survives ring reboots.
     /// After configuring, starts a periodic sync timer at the same interval.
     private func ensureHRLogSettings() async {
-        let savedInterval = UserDefaults.standard.object(forKey: "hrLogInterval") as? Int ?? 1
+        let savedInterval = UserDefaults.standard.object(forKey: AppSettings.Ring.hrLogInterval) as? Int ?? 1
         let ringSettings = try? await readHRLogSettings()
         tLog("[SyncOnConnect] HR log settings: enabled=\(ringSettings?.enabled ?? false), interval=\(ringSettings?.intervalMinutes ?? 0)min")
 
@@ -1500,20 +1478,17 @@ extension RingSessionManager {
 
     private func handleHRVDataResponse(packet: [UInt8]) {
         guard packet.count >= 2 else { return }
-        hrvDataPacketCallback?(packet)
-        hrvDataPacketPersistenceCallback?(packet)
+        dataDelegate?.ringDidReceiveHRVPacket(packet)
     }
 
     private func handlePressureDataResponse(packet: [UInt8]) {
         guard packet.count >= 2 else { return }
-        pressureDataPacketCallback?(packet)
-        pressureDataPacketPersistenceCallback?(packet)
+        dataDelegate?.ringDidReceivePressurePacket(packet)
     }
 
     private func handleActivityDataResponse(packet: [UInt8]) {
         guard packet.count >= 2 else { return }
-        activityDataPacketCallback?(packet)
-        activityDataPacketPersistenceCallback?(packet)
+        dataDelegate?.ringDidReceiveActivityPacket(packet)
     }
     
     func sendPacket(packet: [UInt8]) {
@@ -2151,7 +2126,7 @@ extension RingSessionManager {
             tLog("[HRL] WARNING: No map entry for UTC \(ringUTCDay) — falling back to today local \(requestedDay)")
         }
         tLog("[HRL] Parsed log: ringTimestamp=\(log.timestamp) localDay=\(requestedDay) range=\(log.range)min nonZero=\(log.heartRates.filter { $0 > 0 }.count) mapRemaining=\(heartRateLogUTCToLocalDay.count)")
-        heartRateLogPersistenceCallback?(log, requestedDay)
+        dataDelegate?.ringDidReceiveHeartRateLog(log, requestedDay: requestedDay)
         heartRateLogCallback?(log)
         heartRateLogCallback = nil
     }

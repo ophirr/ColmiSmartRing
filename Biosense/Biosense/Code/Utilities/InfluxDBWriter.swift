@@ -29,9 +29,9 @@ struct InfluxDBConfig {
         let token = resolveToken(defaults: defaults)
         guard !token.isEmpty else { return nil }
         return InfluxDBConfig(
-            url: defaults.string(forKey: "influxdb.url") ?? Secrets.influxDBURL,
-            org: defaults.string(forKey: "influxdb.org") ?? Secrets.influxDBOrg,
-            bucket: defaults.string(forKey: "influxdb.bucket") ?? Secrets.influxDBBucket,
+            url: defaults.string(forKey: AppSettings.InfluxDB.url) ?? Secrets.influxDBURL,
+            org: defaults.string(forKey: AppSettings.InfluxDB.org) ?? Secrets.influxDBOrg,
+            bucket: defaults.string(forKey: AppSettings.InfluxDB.bucket) ?? Secrets.influxDBBucket,
             demoBucket: Secrets.influxDBDemoBucket,
             token: token
         )
@@ -40,12 +40,12 @@ struct InfluxDBConfig {
     /// Persist config — token goes to Keychain, non-secret fields to UserDefaults.
     func save() {
         let defaults = UserDefaults.standard
-        defaults.set(url, forKey: "influxdb.url")
-        defaults.set(org, forKey: "influxdb.org")
-        defaults.set(bucket, forKey: "influxdb.bucket")
+        defaults.set(url, forKey: AppSettings.InfluxDB.url)
+        defaults.set(org, forKey: AppSettings.InfluxDB.org)
+        defaults.set(bucket, forKey: AppSettings.InfluxDB.bucket)
         KeychainHelper.write(service: Self.keychainService, account: Self.keychainAccount, value: token)
         // Remove legacy plaintext token from UserDefaults if present.
-        defaults.removeObject(forKey: "influxdb.token")
+        defaults.removeObject(forKey: AppSettings.InfluxDB.token)
     }
 
     func writeURL(demo: Bool) -> URL? {
@@ -61,9 +61,9 @@ struct InfluxDBConfig {
             return token
         }
         // 2. One-time migration from UserDefaults (pre-Keychain builds)
-        if let legacy = defaults.string(forKey: "influxdb.token"), !legacy.isEmpty {
+        if let legacy = defaults.string(forKey: AppSettings.InfluxDB.token), !legacy.isEmpty {
             KeychainHelper.write(service: keychainService, account: keychainAccount, value: legacy)
-            defaults.removeObject(forKey: "influxdb.token")
+            defaults.removeObject(forKey: AppSettings.InfluxDB.token)
             tLog("[InfluxDB] Migrated token from UserDefaults to Keychain")
             return legacy
         }
@@ -145,7 +145,7 @@ final class InfluxDBWriter {
     /// Current activity tag applied to all writes.
     var activeTag: ActivityTag = .none {
         didSet {
-            UserDefaults.standard.set(activeTag.rawValue, forKey: "influxdb.activeTag")
+            UserDefaults.standard.set(activeTag.rawValue, forKey: AppSettings.InfluxDB.activeTag)
             tLog("[InfluxDB] Tag changed → \(activeTag.displayName)")
         }
     }

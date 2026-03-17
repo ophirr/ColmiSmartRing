@@ -68,9 +68,9 @@ class GymSessionManager {
 
     // MARK: - Private
 
-    private static let zoneConfigKey = "gymZoneConfig"
-    private static let ringFingerKey = "gymRingFinger"
-    private static let hapticsKey = "gymHapticsEnabled"
+    private static let zoneConfigKey = AppSettings.Gym.zoneConfig
+    private static let ringFingerKey = AppSettings.Gym.ringFinger
+    private static let hapticsKey = AppSettings.Gym.hapticsEnabled
     private static let hrPollInterval: TimeInterval = 1.0
 
     /// Aggressive watchdog: the ring's firmware silently stops 0x69 packets

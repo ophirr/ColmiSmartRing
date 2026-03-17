@@ -11,7 +11,7 @@ import SwiftUI
 struct HRLogIntervalSectionView: View {
     @Bindable var ringSessionManager: RingSessionManager
 
-    @AppStorage("hrLogInterval") private var savedInterval: Int = 1
+    @AppStorage(AppSettings.Ring.hrLogInterval) private var savedInterval: Int = 1
     @State private var sliderValue: Double = 1
     @State private var isSending = false
 

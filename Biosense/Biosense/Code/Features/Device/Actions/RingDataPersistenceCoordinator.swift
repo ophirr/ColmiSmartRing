@@ -18,71 +18,14 @@ final class RingDataPersistenceCoordinator {
     init(modelContext: ModelContext, ringSessionManager: RingSessionManager) {
         self.modelContext = modelContext
         self.ringSessionManager = ringSessionManager
-        if UserDefaults.standard.bool(forKey: "cloudSyncEnabled") {
+        if UserDefaults.standard.bool(forKey: AppSettings.CloudSync.enabled) {
             influx.start()
         }
     }
 
     func start() {
         SwiftDataMigrations.runAll(context: modelContext)
-
-        ringSessionManager.bigDataSleepPersistenceCallback = { [weak self] sleepData in
-            guard let self else { return }
-            self.persistSleepData(sleepData)
-        }
-        ringSessionManager.heartRateLogPersistenceCallback = { [weak self] heartRateLog, requestedDay in
-            guard let self else { return }
-            self.persistHeartRateLog(heartRateLog, requestedDay: requestedDay)
-        }
-        ringSessionManager.activityDataPacketPersistenceCallback = { [weak self] packet in
-            guard let self else { return }
-            self.consumeActivityPacket(packet)
-        }
-        ringSessionManager.hrvDataPacketPersistenceCallback = { [weak self] packet in
-            guard let self else { return }
-            self.consumeSplitSeriesPacket(packet, isHRV: true)
-        }
-        ringSessionManager.pressureDataPacketPersistenceCallback = { [weak self] packet in
-            guard let self else { return }
-            self.consumeSplitSeriesPacket(packet, isHRV: false)
-        }
-        ringSessionManager.bigDataBloodOxygenPayloadPersistenceCallback = { [weak self] payload in
-            guard let self else { return }
-            tLog("[AutoPersist] Blood oxygen payload (\(payload.count) bytes): \(payload.prefix(20).map { String($0) }.joined(separator: ","))\(payload.count > 20 ? "…" : "")")
-            let decoded = self.decodeBloodOxygenPayload(payload)
-            tLog("[AutoPersist] Blood oxygen decoded \(decoded.count) valid points from \(payload.count) byte payload")
-            self.persistBloodOxygenSeries(decoded)
-
-            // Populate home card with latest SpO2 from today's historical data
-            // so it shows immediately on connect (before the spot-check rotation reaches SpO2).
-            if self.ringSessionManager.realTimeBloodOxygenPercent == nil {
-                let todayStart = Calendar.current.startOfDay(for: Date())
-                if let latest = decoded.filter({ $0.time >= todayStart && $0.value > 0 && $0.value <= 100 })
-                    .max(by: { $0.time < $1.time }) {
-                    let pct = Int(latest.value)
-                    tLog("[AutoPersist] Seeding home SpO2 card with historical value: \(pct)%")
-                    self.ringSessionManager.realTimeBloodOxygenPercent = pct
-                }
-            }
-
-            // Backfill: if a real-time SpO2 value exists and the latest stored sample
-            // is older than 30 minutes, persist the current reading so the chart
-            // extends closer to "now" (covers spot-checks that happened before the
-            // persistence callback was wired, or between historical syncs).
-            if let currentPct = self.ringSessionManager.realTimeBloodOxygenPercent {
-                let allSamples = (try? self.modelContext.fetch(FetchDescriptor<StoredBloodOxygenSample>())) ?? []
-                let latestStored = allSamples.max(by: { $0.timestamp < $1.timestamp })
-                let gap = Date().timeIntervalSince(latestStored?.timestamp ?? .distantPast)
-                if gap > 30 * 60 {
-                    self.persistSpotCheckSpO2(percent: currentPct, time: Date())
-                }
-            }
-        }
-
-        ringSessionManager.spotCheckSpO2PersistenceCallback = { [weak self] percent, time in
-            guard let self else { return }
-            self.persistSpotCheckSpO2(percent: percent, time: time)
-        }
+        ringSessionManager.dataDelegate = self
     }
 
     // MARK: - Sleep
@@ -600,5 +543,64 @@ final class RingDataPersistenceCoordinator {
         case .core: return "core"
         case .awake: return "awake"
         }
+    }
+}
+
+// MARK: - RingDataDelegate
+
+extension RingDataPersistenceCoordinator: RingDataDelegate {
+    func ringDidReceiveSleepData(_ data: BigDataSleepData) {
+        persistSleepData(data)
+    }
+
+    func ringDidReceiveHeartRateLog(_ log: HeartRateLog, requestedDay: Date) {
+        persistHeartRateLog(log, requestedDay: requestedDay)
+    }
+
+    func ringDidReceiveActivityPacket(_ packet: [UInt8]) {
+        consumeActivityPacket(packet)
+    }
+
+    func ringDidReceiveHRVPacket(_ packet: [UInt8]) {
+        consumeSplitSeriesPacket(packet, isHRV: true)
+    }
+
+    func ringDidReceivePressurePacket(_ packet: [UInt8]) {
+        consumeSplitSeriesPacket(packet, isHRV: false)
+    }
+
+    func ringDidReceiveBloodOxygenPayload(_ payload: [UInt8]) {
+        tLog("[AutoPersist] Blood oxygen payload (\(payload.count) bytes): \(payload.prefix(20).map { String($0) }.joined(separator: ","))\(payload.count > 20 ? "…" : "")")
+        let decoded = decodeBloodOxygenPayload(payload)
+        tLog("[AutoPersist] Blood oxygen decoded \(decoded.count) valid points from \(payload.count) byte payload")
+        persistBloodOxygenSeries(decoded)
+
+        // Populate home card with latest SpO2 from today's historical data
+        // so it shows immediately on connect (before the spot-check rotation reaches SpO2).
+        if ringSessionManager.realTimeBloodOxygenPercent == nil {
+            let todayStart = Calendar.current.startOfDay(for: Date())
+            if let latest = decoded.filter({ $0.time >= todayStart && $0.value > 0 && $0.value <= 100 })
+                .max(by: { $0.time < $1.time }) {
+                let pct = Int(latest.value)
+                tLog("[AutoPersist] Seeding home SpO2 card with historical value: \(pct)%")
+                ringSessionManager.realTimeBloodOxygenPercent = pct
+            }
+        }
+
+        // Backfill: if a real-time SpO2 value exists and the latest stored sample
+        // is older than 30 minutes, persist the current reading so the chart
+        // extends closer to "now".
+        if let currentPct = ringSessionManager.realTimeBloodOxygenPercent {
+            let allSamples = (try? modelContext.fetch(FetchDescriptor<StoredBloodOxygenSample>())) ?? []
+            let latestStored = allSamples.max(by: { $0.timestamp < $1.timestamp })
+            let gap = Date().timeIntervalSince(latestStored?.timestamp ?? .distantPast)
+            if gap > 30 * 60 {
+                persistSpotCheckSpO2(percent: currentPct, time: Date())
+            }
+        }
+    }
+
+    func ringDidReceiveSpotCheckSpO2(percent: Int, time: Date) {
+        persistSpotCheckSpO2(percent: percent, time: time)
     }
 }

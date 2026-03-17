@@ -13,7 +13,7 @@ enum SwiftDataMigrations {
     /// with today's date regardless of actual date, so the DB is unreliable.
     /// The next ring sync will repopulate with correctly-dated data.
     static func purgeStaleActivitySamples(context: ModelContext) {
-        let key = "activityParserV4Migrated"
+        let key = AppSettings.Migration.activityParserV4
         guard !UserDefaults.standard.bool(forKey: key) else { return }
 
         do {
@@ -35,7 +35,7 @@ enum SwiftDataMigrations {
     /// After lightweight migration these rows have `Date.distantPast`; recompute from
     /// `syncDate` and `daysAgo`.
     static func backfillSleepNightDates(context: ModelContext) {
-        let key = "sleepNightDateBackfilled"
+        let key = AppSettings.Migration.sleepNightDateBackfill
         guard !UserDefaults.standard.bool(forKey: key) else { return }
 
         do {
@@ -65,7 +65,7 @@ enum SwiftDataMigrations {
     /// the race condition bug (single requestedDay variable overwritten by
     /// concurrent requests). Next sync will re-populate with correct dates.
     static func purgeStaleHeartRateLogs(context: ModelContext) {
-        let key = "hrLogUTCMapFixPurgeV4"
+        let key = AppSettings.Migration.hrLogUTCPurgeV4
         guard !UserDefaults.standard.bool(forKey: key) else { return }
 
         do {
