@@ -82,6 +82,11 @@ struct HomeScreenView: View {
             .listStyle(.insetGrouped)
             .navigationTitle(L10n.Tab.home)
             .navigationBarTitleDisplayMode(.large)
+            .onAppear {
+                if ringSessionManager.peripheralConnected {
+                    ringSessionManager.syncActivityData(dayOffset: 0)
+                }
+            }
         }
     }
 

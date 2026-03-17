@@ -1642,7 +1642,22 @@ extension RingSessionManager {
 
     /// Request activity data (steps/calories/distance) via CMD_GET_STEP_SOMEDAY (0x43 / 67).
     /// Sub-data: [dayOffset, 0x0F, 0x00, 0x5F, 0x01]  (matches Python colmi_r02_client).
+    ///
+    /// The ring stores activity in UTC days.  When the local timezone is behind
+    /// UTC, "today local" spans two UTC days.  For dayOffset 0 we automatically
+    /// also fetch dayOffset 1 (yesterday UTC) so the full local day is covered.
     func syncActivityData(dayOffset: Int = 0) {
+        sendActivityRequest(dayOffset: dayOffset)
+        // When fetching "today" (offset 0), also fetch "yesterday UTC" so that
+        // the earlier part of "today local" is included.
+        if dayOffset == 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.sendActivityRequest(dayOffset: 1)
+            }
+        }
+    }
+
+    private func sendActivityRequest(dayOffset: Int) {
         do {
             let packet = try makePacket(command: Self.CMD_READ_ACTIVITY_DATA, subData: [
                 UInt8(dayOffset & 0xFF),

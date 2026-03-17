@@ -303,6 +303,14 @@ final class RingDataPersistenceCoordinator {
         return Int((b >> 4) & 0x0F) * 10 + Int(b & 0x0F)
     }
 
+    /// Format a Date as local "yyyy-MM-dd HH:mm" for logging.
+    private static func localTimeStr(_ date: Date) -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd HH:mm"
+        fmt.timeZone = .current
+        return fmt.string(from: date)
+    }
+
     private func consumeActivityPacket(_ packet: [UInt8]) {
         guard packet.count >= 13, packet[0] == 67 else { return }
 
@@ -354,17 +362,24 @@ final class RingDataPersistenceCoordinator {
         let currentIdx = Int(packet[5])                                  // 0-based
         let totalPackets = Int(packet[6])                                // total count
 
-        // Build date from BCD fields
-        var comps = DateComponents()
-        comps.year = year; comps.month = month; comps.day = day
-        let slotDate = Calendar.current.date(from: comps) ?? Calendar.current.startOfDay(for: Date())
+        // Build the slot's actual UTC timestamp from BCD date + slot time,
+        // then derive the local date for grouping.  The ring reports dates/times
+        // in UTC, so we must interpret them in UTC first, then convert to local.
+        var utcCal = Calendar(identifier: .gregorian)
+        utcCal.timeZone = TimeZone(identifier: "UTC")!
+        var utcComps = DateComponents()
+        utcComps.year = year; utcComps.month = month; utcComps.day = day
+        utcComps.hour = hour; utcComps.minute = minute
+        let slotUTCDate = utcCal.date(from: utcComps) ?? Date()
+        let localDay = Calendar.current.startOfDay(for: slotUTCDate)
+        let localHour = Calendar.current.component(.hour, from: slotUTCDate)
 
-        tLog("[Activity] \(year)-\(String(format:"%02d-%02d", month, day)) slot=\(timeIndex) (\(String(format:"%02d:%02d", hour, minute)))  steps=\(steps) dist=\(distanceMeters)m cal=\(calories)  pkt \(currentIdx+1)/\(totalPackets)")
+        tLog("[Activity] \(year)-\(String(format:"%02d-%02d", month, day)) slot=\(timeIndex) (\(String(format:"%02d:%02d", hour, minute)) UTC → \(Self.localTimeStr(slotUTCDate)) local)  steps=\(steps) dist=\(distanceMeters)m cal=\(calories)  pkt \(currentIdx+1)/\(totalPackets)")
 
         if steps > 0 || distanceMeters > 0 || calories > 0 {
             activityBatch.append(ParsedActivitySlot(
-                date: Calendar.current.startOfDay(for: slotDate),
-                hour: hour, minute: minute,
+                date: localDay,
+                hour: localHour, minute: minute,
                 steps: steps, distanceMeters: distanceMeters, calories: calories))
         }
 

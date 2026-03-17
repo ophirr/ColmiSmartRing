@@ -625,7 +625,7 @@ struct ReadingsGraphsView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 24)
             } else {
-                HeartRateGraphView(data: points)
+                HeartRateGraphView(data: points, xDomain: selectedDayStart...selectedDayEnd)
             }
         }
         .padding(.vertical, 8)
