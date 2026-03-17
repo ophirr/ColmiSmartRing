@@ -189,10 +189,10 @@ final class RingDataPersistenceCoordinator {
         tLog("[AutoPersist] Heart rate log save requested. action=\(action) dayStart=\(formatDate(dayStart)) range=\(log.range)min nonZero=\(nonZeroCount)/\(log.heartRates.count)")
         _ = saveContext(tag: "HeartRate")
 
-        // Stream to InfluxDB
-        let readings = log.heartRatesWithTimes()
+        // Stream to InfluxDB using UTC-anchored timestamps (raw ring slots are UTC-indexed).
+        let readings = log.heartRatesWithTimesUTC()
         if !readings.isEmpty {
-            tLog("[AutoPersist] HR log → InfluxDB: \(readings.count) non-zero readings")
+            tLog("[AutoPersist] HR log → InfluxDB: \(readings.count) non-zero readings (UTC-anchored)")
             influx.writeHeartRates(readings.map { (bpm: $0.0, time: $0.1) })
         } else {
             tLog("[AutoPersist] HR log → InfluxDB: no non-zero readings")
@@ -600,11 +600,11 @@ final class RingDataPersistenceCoordinator {
         }
     }
 
+    /// Build an absolute timestamp from a ring-reported daysAgo + UTC hour.
+    /// The ring indexes hours from UTC midnight, so we compute the UTC time
+    /// then return it as an absolute Date (correct for both chart and InfluxDB).
     private func dayAtHour(daysAgo: Int, hour: Int) -> Date {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        let day = calendar.date(byAdding: .day, value: -daysAgo, to: today) ?? today
-        return calendar.date(bySettingHour: max(0, min(23, hour)), minute: 0, second: 0, of: day) ?? day
+        RingSlotTimestamp.date(daysAgo: daysAgo, hour: hour)
     }
 
     // MARK: - Shared

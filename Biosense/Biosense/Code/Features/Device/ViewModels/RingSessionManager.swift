@@ -2412,11 +2412,9 @@ extension RingSessionManager {
     /// The ring clock is set to UTC, so its internal "day" runs midnight-to-midnight UTC.
     /// We must request HR logs using UTC day boundaries so the ring returns the correct data.
     private func dayStartInUTC(for base: Date = Date(), dayOffset: Int = 0) -> Date? {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "UTC")!
-        let start = calendar.startOfDay(for: base)
+        let start = RingSlotTimestamp.utcStartOfDay(for: base)
         guard dayOffset != 0 else { return start }
-        return calendar.date(byAdding: .day, value: -dayOffset, to: start)
+        return Calendar(identifier: .gregorian).date(byAdding: .day, value: -dayOffset, to: start)
     }
 
     func getHeartRateLog(dayOffset: Int = 0, completion: @escaping (HeartRateLog) -> Void) {
@@ -2476,9 +2474,7 @@ extension RingSessionManager {
         // Look up the local day from our UTC→local map using the ring's timestamp.
         // The ring echoes back the UTC midnight we requested, so this is a direct key match.
         // This avoids FIFO ordering issues — the map is keyed, not sequential.
-        var utcCal = Calendar(identifier: .gregorian)
-        utcCal.timeZone = TimeZone(identifier: "UTC")!
-        let ringUTCDay = utcCal.startOfDay(for: log.timestamp)
+        let ringUTCDay = RingSlotTimestamp.utcStartOfDay(for: log.timestamp)
 
         let requestedDay: Date
         if let mapped = heartRateLogUTCToLocalDay.removeValue(forKey: ringUTCDay) {

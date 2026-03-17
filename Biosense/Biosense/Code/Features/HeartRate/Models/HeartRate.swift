@@ -132,6 +132,8 @@ func readXPacket(for target: Date) throws -> [UInt8] {
     return try makePacket(command: Counter.shared.CMD_X, subData: data)
 }
 
+/// Pair each HR slot with a timestamp starting at local midnight of `timestamp`.
+/// Used by the chart path (after UTC→local rotation via `toHeartRateLog()`).
 func addTimes(heartRates: [Int], timestamp: Date, rangeMinutes: Int = 5) -> [(Int, Date)] {
     var result: [(Int, Date)] = []
     var current = Calendar.current.startOfDay(for: timestamp)
@@ -143,6 +145,17 @@ func addTimes(heartRates: [Int], timestamp: Date, rangeMinutes: Int = 5) -> [(In
     return result
 }
 
+/// Pair each HR slot with its true UTC timestamp.
+/// The ring indexes slots from UTC midnight (slot 0 = 00:00 UTC), so we
+/// anchor at the UTC start-of-day. Used for InfluxDB writes where absolute
+/// time accuracy matters.
+func addTimesUTC(heartRates: [Int], timestamp: Date, rangeMinutes: Int = 5) -> [(Int, Date)] {
+    let anchor = RingSlotTimestamp.utcStartOfDay(for: timestamp)
+    return heartRates.enumerated().map { idx, hr in
+        (hr, RingSlotTimestamp.date(slot: idx, rangeMinutes: rangeMinutes, utcDayStart: anchor))
+    }
+}
+
 // HeartRateLog Struct
 struct HeartRateLog {
     var heartRates: [Int]
@@ -152,9 +165,16 @@ struct HeartRateLog {
     var index: Int
     var range: Int
     
+    /// Slot data with local-anchored timestamps (for chart display after rotation).
     func heartRatesWithTimes() -> [(Int, Date)] {
         return addTimes(heartRates: heartRates, timestamp: timestamp, rangeMinutes: range)
-            .filter { $0.0 > 0 } // Filter out zeros and -1 sentinel values
+            .filter { $0.0 > 0 }
+    }
+
+    /// Slot data with true UTC timestamps (for InfluxDB — raw ring slots are UTC-indexed).
+    func heartRatesWithTimesUTC() -> [(Int, Date)] {
+        return addTimesUTC(heartRates: heartRates, timestamp: timestamp, rangeMinutes: range)
+            .filter { $0.0 > 0 }
     }
 }
 

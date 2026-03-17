@@ -69,18 +69,22 @@ enum SplitSeriesPacketParser {
         return .values(values)
     }
 
+    /// Build a time series from raw slot values.
+    /// The ring indexes slots from UTC midnight (slot 0 = 00:00 UTC), so we
+    /// anchor at UTC start-of-day. The resulting Date values are absolute
+    /// timestamps — correct for both InfluxDB writes and local chart display.
     static func buildSeriesFromRaw(
         _ raw: [UInt8],
         expectedCount: Int,
         rangeMinutes: Int,
-        startOfDay: Date = Calendar.current.startOfDay(for: Date())
+        startOfDay: Date? = nil
     ) -> [TimeSeriesPoint] {
         // In real ring payloads for commands 55/57, header[2] is not reliable as a strict
         // "number of usable samples". Truncating to that value drops valid points.
         _ = expectedCount
-        let values = raw
-        return values.enumerated().map { idx, v in
-            let t = startOfDay.addingTimeInterval(TimeInterval(idx * rangeMinutes * 60))
+        let anchor = startOfDay ?? RingSlotTimestamp.utcStartOfDay()
+        return raw.enumerated().map { idx, v in
+            let t = RingSlotTimestamp.date(slot: idx, rangeMinutes: rangeMinutes, utcDayStart: anchor)
             return TimeSeriesPoint(time: t, value: Double(v))
         }.filter { $0.value > 0 }
     }
