@@ -82,12 +82,25 @@ struct HomeScreenView: View {
             .listStyle(.insetGrouped)
             .navigationTitle(L10n.Tab.home)
             .navigationBarTitleDisplayMode(.large)
+            .refreshable { await refreshHomeData() }
             .onAppear {
                 if ringSessionManager.peripheralConnected {
                     ringSessionManager.syncActivityData(dayOffset: 0)
                 }
             }
         }
+    }
+
+    /// Pull-to-refresh: re-request today's data for all metrics from the ring.
+    private func refreshHomeData() async {
+        guard ringSessionManager.peripheralConnected else { return }
+        ringSessionManager.getHeartRateLog(dayOffset: 0) { _ in }
+        ringSessionManager.syncActivityData(dayOffset: 0)
+        ringSessionManager.syncHRVData(dayOffset: 0)
+        ringSessionManager.syncBloodOxygen(dayOffset: 0)
+        ringSessionManager.syncPressureData(dayOffset: 0)
+        // Give the ring time to respond before the spinner dismisses.
+        try? await Task.sleep(for: .seconds(2))
     }
 
     private var homeSleepLegend: some View {

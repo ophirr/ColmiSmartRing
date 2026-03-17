@@ -74,6 +74,24 @@ final class RingDataPersistenceCoordinator {
                     self.ringSessionManager.realTimeBloodOxygenPercent = pct
                 }
             }
+
+            // Backfill: if a real-time SpO2 value exists and the latest stored sample
+            // is older than 30 minutes, persist the current reading so the chart
+            // extends closer to "now" (covers spot-checks that happened before the
+            // persistence callback was wired, or between historical syncs).
+            if let currentPct = self.ringSessionManager.realTimeBloodOxygenPercent {
+                let allSamples = (try? self.modelContext.fetch(FetchDescriptor<StoredBloodOxygenSample>())) ?? []
+                let latestStored = allSamples.max(by: { $0.timestamp < $1.timestamp })
+                let gap = Date().timeIntervalSince(latestStored?.timestamp ?? .distantPast)
+                if gap > 30 * 60 {
+                    self.persistSpotCheckSpO2(percent: currentPct, time: Date())
+                }
+            }
+        }
+
+        ringSessionManager.spotCheckSpO2PersistenceCallback = { [weak self] percent, time in
+            guard let self else { return }
+            self.persistSpotCheckSpO2(percent: percent, time: time)
         }
     }
 
@@ -559,6 +577,7 @@ final class RingDataPersistenceCoordinator {
     }
 
     private func decodeBloodOxygenHourlyPairs(sampleBytes: [UInt8], daysAgo: Int) -> [TimeSeriesPoint] {
+        let now = Date()
         var points: [TimeSeriesPoint] = []
         var hour = 0
         var i = 0
@@ -566,8 +585,11 @@ final class RingDataPersistenceCoordinator {
             let maxV = Double(sampleBytes[i])
             let minV = Double(sampleBytes[i + 1])
             let avg = (maxV + minV) / 2.0
-            if avg >= 80 {  // Values below 80% indicate no data / ring not worn
-                points.append(TimeSeriesPoint(time: dayAtHour(daysAgo: daysAgo, hour: hour), value: avg))
+            let t = dayAtHour(daysAgo: daysAgo, hour: hour)
+            // Drop values below 80% (no data / ring not worn) and future timestamps
+            // (stale ring data from slots past the current time).
+            if avg >= 80, t <= now {
+                points.append(TimeSeriesPoint(time: t, value: avg))
             }
             i += 2
             hour += 1
@@ -598,6 +620,23 @@ final class RingDataPersistenceCoordinator {
         for point in series {
             influx.writeSpO2(value: point.value, time: point.time)
         }
+    }
+
+    /// Persist a single real-time SpO2 spot-check reading to SwiftData.
+    /// The value already went to InfluxDB/HealthKit in RingSessionManager;
+    /// this ensures it also appears on the Metrics chart.
+    private func persistSpotCheckSpO2(percent: Int, time: Date) {
+        let value = Double(percent)
+        // Check for an existing sample within the same minute to avoid duplicates.
+        let existingSamples = (try? modelContext.fetch(FetchDescriptor<StoredBloodOxygenSample>())) ?? []
+        let isDuplicate = existingSamples.contains { abs($0.timestamp.timeIntervalSince(time)) < 60 && $0.value == value }
+        guard !isDuplicate else {
+            tLog("[AutoPersist] SpO2 spot-check \(percent)% at \(Self.logDateFormatter.string(from: time)) — duplicate, skipping")
+            return
+        }
+        modelContext.insert(StoredBloodOxygenSample(timestamp: time, value: value))
+        tLog("[AutoPersist] SpO2 spot-check \(percent)% at \(Self.logDateFormatter.string(from: time)) — saved to SwiftData")
+        _ = saveContext(tag: "SpO2SpotCheck")
     }
 
     /// Build an absolute timestamp from a ring-reported daysAgo + UTC hour.

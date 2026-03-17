@@ -252,43 +252,40 @@ struct ReadingsGraphsView: View {
             .map { TimeSeriesPoint(time: $0.timestamp, value: Double($0.calories)) }
     }
 
-    /// Shift a UTC-anchored Date to its local-time equivalent for chart display.
-    /// For example, 03:00 UTC in PST (UTC-8) becomes 03:00 local = 11:00 UTC,
-    /// so the chart x-axis reads "03" at the point that actually happened at 03:00 UTC.
-    /// This keeps InfluxDB/stored data in true UTC while showing local hours on chart axes.
-    private static func utcToLocalForDisplay(_ utcDate: Date) -> Date {
-        let offset = TimeInterval(TimeZone.current.secondsFromGMT(for: utcDate))
-        return utcDate.addingTimeInterval(offset)
-    }
-
     private var hrvData: [TimeSeriesPoint] {
+        let now = Date()
         return selectedDayHRVSamples
-            .map { TimeSeriesPoint(time: Self.utcToLocalForDisplay($0.timestamp), value: $0.value) }
+            .filter { $0.timestamp <= now }
+            .map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) }
     }
 
     private var bloodOxygenData: [TimeSeriesPoint] {
+        let now = Date()
         return selectedDayBloodOxygenSamples
-            .map { TimeSeriesPoint(time: Self.utcToLocalForDisplay($0.timestamp), value: $0.value) }
+            .filter { $0.timestamp <= now }
+            .map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) }
     }
 
     private var stressData: [TimeSeriesPoint] {
+        let now = Date()
         return selectedDayStressSamples
-            .map { TimeSeriesPoint(time: Self.utcToLocalForDisplay($0.timestamp), value: $0.value) }
+            .filter { $0.timestamp <= now }
+            .map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) }
     }
 
     var body: some View {
         NavigationStack {
             List {
+                realTimeTrackingSection
                 timeRangePickerSection
                 heartRateSection
+                bloodOxygenSection
                 if includeActivitySection {
                     activitySection
                 }
                 hrvSection
-                bloodOxygenSection
                 stressSection
                 sleepSection
-                realTimeTrackingSection
             }
             .listStyle(.insetGrouped)
             .navigationTitle(L10n.Graphs.navTitle)
@@ -792,59 +789,67 @@ struct ReadingsGraphsView: View {
 
     private var realTimeTrackingSection: some View {
         Section {
-            VStack(spacing: 20) {
-                // Heart Rate
-                VStack(spacing: 6) {
-                    Label(L10n.Graphs.heartRateSection, systemImage: "heart.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(ringSessionManager.realTimeHeartRateBPM.map { "\($0) \(L10n.HomeSummary.bpm)" } ?? L10n.HomeSummary.noData)
-                        .font(.system(size: 34, weight: .bold, design: .rounded))
-                        .foregroundStyle(.primary)
-                        .contentTransition(.numericText())
-                        .animation(.easeInOut(duration: 0.3), value: ringSessionManager.realTimeHeartRateBPM)
+            VStack(spacing: 12) {
+                HStack(spacing: 12) {
+                    // Heart Rate
+                    realTimeCard(
+                        icon: "heart.fill",
+                        label: L10n.Graphs.heartRateSection,
+                        value: ringSessionManager.realTimeHeartRateBPM.map { "\($0)" },
+                        unit: L10n.HomeSummary.bpm,
+                        color: .red
+                    )
+                    // Blood Oxygen
+                    realTimeCard(
+                        icon: "lungs.fill",
+                        label: "SpO2",
+                        value: ringSessionManager.realTimeBloodOxygenPercent.map { "\($0)" },
+                        unit: "%",
+                        color: .cyan
+                    )
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                // Blood Oxygen
-                VStack(spacing: 6) {
-                    Label(L10n.Graphs.bloodOxygenSection, systemImage: "drop.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(ringSessionManager.realTimeBloodOxygenPercent.map { "\($0)%" } ?? L10n.HomeSummary.noData)
-                        .font(.system(size: 34, weight: .bold, design: .rounded))
-                        .foregroundStyle(.primary)
-                        .contentTransition(.numericText())
-                        .animation(.easeInOut(duration: 0.3), value: ringSessionManager.realTimeBloodOxygenPercent)
+                HStack(spacing: 12) {
+                    // Body Temperature
+                    realTimeCard(
+                        icon: "thermometer.medium",
+                        label: "Temp",
+                        value: ringSessionManager.realTimeTemperatureCelsius.map { String(format: "%.1f", $0) },
+                        unit: "°C",
+                        color: .orange
+                    )
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                // Body Temperature
-                VStack(spacing: 6) {
-                    Label("Body Temp", systemImage: "thermometer.medium")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(ringSessionManager.realTimeTemperatureCelsius.map { String(format: "%.1f °C", $0) } ?? L10n.HomeSummary.noData)
-                        .font(.system(size: 34, weight: .bold, design: .rounded))
-                        .foregroundStyle(.primary)
-                        .contentTransition(.numericText())
-                        .animation(.easeInOut(duration: 0.3), value: ringSessionManager.realTimeTemperatureCelsius)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .padding(.vertical, 4)
         } header: {
             Label(L10n.Graphs.realtimeSection, systemImage: "waveform.path.ecg")
         }
+    }
+
+    private func realTimeCard(icon: String, label: String, value: String?, unit: String, color: Color) -> some View {
+        VStack(spacing: 4) {
+            Label(label, systemImage: icon)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if let value {
+                HStack(alignment: .firstTextBaseline, spacing: 2) {
+                    Text(value)
+                        .font(.system(size: 34, weight: .bold, design: .rounded))
+                        .foregroundStyle(color)
+                        .contentTransition(.numericText())
+                    Text(unit)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text(L10n.HomeSummary.noData)
+                    .font(.subheadline)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func wireLiveMetricCallbacks() {

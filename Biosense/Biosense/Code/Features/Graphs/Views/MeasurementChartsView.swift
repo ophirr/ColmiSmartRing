@@ -91,6 +91,7 @@ struct ActivityStepsChartView: View {
             }
             .timeRangeXAxis(timeRange, domain: xDomain)
             .chartYAxis { AxisMarks(position: .leading) }
+            .clipped()
             .frame(height: 180)
         }
         .padding(.vertical, 4)
@@ -127,6 +128,7 @@ struct ActivityDistanceChartView: View {
             }
             .timeRangeXAxis(timeRange, domain: xDomain)
             .chartYAxis { AxisMarks(position: .leading) }
+            .clipped()
             .frame(height: 180)
         }
         .padding(.vertical, 4)
@@ -475,13 +477,13 @@ struct HRVChartView: View {
     }
 }
 
-// MARK: - Blood Oxygen (%, bar 80–100)
+// MARK: - Blood Oxygen (%, line+point 85–100)
 
 struct BloodOxygenChartView: View {
     let data: [TimeSeriesPoint]
     var title: String = "Blood Oxygen"
     var unit: String = "%"
-    var yRange: ClosedRange<Double> = 0...100
+    var yRange: ClosedRange<Double> = 85...100
     var timeRange: TimeRange = .day
     var xDomain: ClosedRange<Date>? = nil
 
@@ -492,12 +494,18 @@ struct BloodOxygenChartView: View {
                 .foregroundStyle(.secondary)
             Chart(data) { point in
                 if timeRange == .day {
-                    BarMark(
+                    LineMark(
                         x: .value("Time", point.time),
-                        y: .value(unit, point.value),
-                        width: .fixed(6)
+                        y: .value(unit, point.value)
                     )
+                    .interpolationMethod(.catmullRom)
                     .foregroundStyle(Color.blue.gradient)
+                    PointMark(
+                        x: .value("Time", point.time),
+                        y: .value(unit, point.value)
+                    )
+                    .symbolSize(20)
+                    .foregroundStyle(Color.blue)
                 } else {
                     BarMark(
                         xStart: .value("Start", dayRange(for: point.time, timeRange: timeRange).lowerBound),
@@ -510,6 +518,7 @@ struct BloodOxygenChartView: View {
             .chartYScale(domain: yRange)
             .timeRangeXAxis(timeRange, domain: xDomain)
             .chartYAxis { AxisMarks(position: .leading) }
+            .clipped()
             .frame(height: 200)
         }
         .padding(.vertical, 4)
@@ -550,6 +559,7 @@ struct StressChartView: View {
             .chartYScale(domain: yRange)
             .timeRangeXAxis(timeRange, domain: xDomain)
             .chartYAxis { AxisMarks(position: .leading) }
+            .clipped()
             .frame(height: 200)
         }
         .padding(.vertical, 4)

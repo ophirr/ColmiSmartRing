@@ -72,7 +72,8 @@ enum SplitSeriesPacketParser {
     /// Build a time series from raw slot values.
     /// The ring indexes slots from UTC midnight (slot 0 = 00:00 UTC), so we
     /// anchor at UTC start-of-day. The resulting Date values are absolute
-    /// timestamps — correct for both InfluxDB writes and local chart display.
+    /// timestamps — correct for both InfluxDB writes and local chart display
+    /// (SwiftCharts handles timezone formatting automatically).
     static func buildSeriesFromRaw(
         _ raw: [UInt8],
         expectedCount: Int,

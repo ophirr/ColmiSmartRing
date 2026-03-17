@@ -336,6 +336,9 @@ class RingSessionManager: NSObject {
     /// Always-on callback intended for persistence layer when a heart-rate log is parsed.
     /// Second parameter is the requested day-start (canonical date for storage/dedup).
     var heartRateLogPersistenceCallback: ((HeartRateLog, Date) -> Void)?
+    /// Called when a real-time SpO2 spot-check produces a valid reading (percent, timestamp).
+    /// Persistence layer should insert a StoredBloodOxygenSample so the value appears on the chart.
+    var spotCheckSpO2PersistenceCallback: ((Int, Date) -> Void)?
     /// Called when the ring is connected and UART characteristics are ready; use this to trigger tracking-settings reads.
     var onReadyForSettingsQuery: (() -> Void)?
     /// HR log interval reported by the ring (minutes). nil = not yet queried.
@@ -964,15 +967,16 @@ extension RingSessionManager: CBPeripheralDelegate {
                     }
                     realTimeBloodOxygenPercent = Int(readingValue)
 
-                    // Spot-check: got a valid SpO2 reading — write to InfluxDB/HealthKit and stop.
+                    // Spot-check: got a valid SpO2 reading — write to InfluxDB/HealthKit/SwiftData and stop.
                     if spotCheckActive && spotCheckType == .spo2 {
-                        tLog("[SpotCheck] Got SpO2 \(readingValue)% — writing to InfluxDB/HealthKit and stopping stream")
+                        tLog("[SpotCheck] Got SpO2 \(readingValue)% — writing to InfluxDB/HealthKit/SwiftData and stopping stream")
                         lastInfluxSpO2Write = now
                         let percent = Int(readingValue)
                         Task { @MainActor in
                             InfluxDBWriter.shared.writeSpO2(value: Double(percent), time: now)
                             await self.healthHRWriter.writeSpO2(percent: percent, time: now)
                         }
+                        spotCheckSpO2PersistenceCallback?(percent, now)
                         finishSpotCheck()
                         break
                     }
