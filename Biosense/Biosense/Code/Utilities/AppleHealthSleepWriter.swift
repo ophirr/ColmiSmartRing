@@ -14,9 +14,9 @@ final class AppleHealthSleepWriter {
             let samples = makeSamples(days: days, todayStart: todayStart)
             guard !samples.isEmpty else { return }
             try await save(samples)
-            print("[HealthKit] Sleep samples written: \(samples.count)")
+            tLog("[HealthKit] Sleep samples written: \(samples.count)")
         } catch {
-            print("[HealthKit] Failed to write sleep samples: \(error)")
+            tLog("[HealthKit] Failed to write sleep samples: \(error)")
         }
     }
 

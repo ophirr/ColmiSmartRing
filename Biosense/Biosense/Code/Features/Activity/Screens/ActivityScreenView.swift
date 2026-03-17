@@ -24,10 +24,6 @@ struct ActivityScreenView: View {
         todayActivitySamples.map { TimeSeriesPoint(time: $0.timestamp, value: Double($0.calories)) }
     }
 
-    private var chartStepsData: [TimeSeriesPoint] { stepsData }
-    private var chartDistanceData: [TimeSeriesPoint] { distanceData }
-    private var chartCaloriesData: [TimeSeriesPoint] { caloriesData }
-
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -40,21 +36,21 @@ struct ActivityScreenView: View {
 
                     VStack(spacing: 20) {
                         ActivityStepsCumulativeChartView(
-                            data: chartStepsData,
+                            data: stepsData,
                             title: L10n.Activity.stepsTitle
                         )
                         .allowsHitTesting(false)
                         .contentShape(Rectangle())
 
                         ActivityDistanceCumulativeChartView(
-                            data: chartDistanceData,
+                            data: distanceData,
                             title: L10n.Activity.distanceTitle
                         )
                         .allowsHitTesting(false)
                         .contentShape(Rectangle())
 
                         ActivityCaloriesCumulativeChartView(
-                            data: chartCaloriesData,
+                            data: caloriesData,
                             title: L10n.Activity.caloriesTitle
                         )
                         .allowsHitTesting(false)

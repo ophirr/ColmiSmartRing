@@ -9,7 +9,6 @@ import SwiftUI
 import SwiftData
 
 struct ReadingsGraphsView: View {
-    @Environment(\.modelContext) private var modelContext
     @Bindable var ringSessionManager: RingSessionManager
     private let includeActivitySection: Bool
     @Query(sort: \StoredSleepDay.syncDate, order: .reverse) private var storedSleepDays: [StoredSleepDay]
@@ -19,8 +18,6 @@ struct ReadingsGraphsView: View {
     @Query(sort: \StoredBloodOxygenSample.timestamp, order: .reverse) private var storedBloodOxygenSamples: [StoredBloodOxygenSample]
     @Query(sort: \StoredStressSample.timestamp, order: .reverse) private var storedStressSamples: [StoredStressSample]
 
-    @State private var hrvSeriesAccumulator = SplitSeriesPacketParser.SeriesAccumulator()
-    @State private var stressSeriesAccumulator = SplitSeriesPacketParser.SeriesAccumulator()
     @State private var selectedTimeRange: TimeRange = .day
     @State private var selectedWeekOffset: Int = 0
     @State private var selectedMonthOffset: Int = 0
@@ -28,7 +25,6 @@ struct ReadingsGraphsView: View {
     @State private var visibleWeekOffset: Int?
 
     private let maxPastWeeks = 104
-    private static let swiftDataLogDateFormatter = ISO8601DateFormatter()
 
     private var sortedSleepDays: [StoredSleepDay] {
         storedSleepDays.sorted { $0.sleepDate > $1.sleepDate }
@@ -873,244 +869,6 @@ struct ReadingsGraphsView: View {
         ringSessionManager.syncPressureData(dayOffset: 0)
         // Give the ring time to respond before the spinner dismisses.
         try? await Task.sleep(for: .seconds(2))
-    }
-
-    private func todayAtHour(_ hour: Int) -> Date {
-        Calendar.current.date(bySettingHour: max(0, min(23, hour)), minute: 0, second: 0, of: Date()) ?? Date()
-    }
-
-    private func consumeActivityPacket(_ packet: [UInt8]) {
-        // Commands 67 (SportsData): [cmd, year, month, day, time, calories(2), steps(2), distance(2), ...]
-        guard packet.count >= 11, packet[0] == 67 else { return }
-        let hour = Int(packet[4])
-        // SportsDataResponse fields are uint16 and ring payload uses little-endian across this protocol.
-        let calories = Int(packet[5]) | (Int(packet[6]) << 8)
-        let steps = Int(packet[7]) | (Int(packet[8]) << 8)
-        let distanceRaw = Int(packet[9]) | (Int(packet[10]) << 8)
-        let distanceKm = Double(distanceRaw) / 100.0
-
-        upsertStoredActivitySample(timestamp: todayAtHour(hour), steps: steps, distanceKm: distanceKm, calories: calories)
-    }
-
-    private func consumeSplitSeriesPacket(_ packet: [UInt8], isHRV: Bool) {
-        // Commands 57 (HRV) / 55 (Pressure): split array format.
-        if isHRV {
-            guard let series = hrvSeriesAccumulator.consume(packet) else { return }
-            persistHRVSeries(series)
-        } else {
-            guard let series = stressSeriesAccumulator.consume(packet) else { return }
-            persistStressSeries(series)
-        }
-    }
-
-    private func consumeBloodOxygenPayload(_ payload: [UInt8]) {
-        let decoded = decodeBigDataBloodOxygen(payload)
-        if !decoded.isEmpty {
-            persistBloodOxygenSeries(decoded)
-        }
-    }
-
-    private func upsertStoredActivitySample(timestamp: Date, steps: Int, distanceKm: Double, calories: Int) {
-        let action: String
-        if let existing = storedActivitySamples.first(where: { $0.timestamp == timestamp }) {
-            existing.steps = steps
-            existing.distanceKm = distanceKm
-            existing.calories = calories
-            action = "UPDATE"
-        } else {
-            modelContext.insert(StoredActivitySample(timestamp: timestamp, steps: steps, distanceKm: distanceKm, calories: calories))
-            action = "INSERT"
-        }
-        tLog("========== SWIFTDATA SAVE: Activity ==========")
-        tLog("action: \(action)")
-        tLog("timestamp: \(swiftDataLogDate(timestamp))")
-        tLog("steps: \(steps), distanceKm: \(distanceKm), calories: \(calories)")
-        do {
-            try modelContext.save()
-            tLog("result: SUCCESS")
-        } catch {
-            tLog("result: FAILED - \(error)")
-        }
-        tLog("==============================================")
-    }
-
-    private func persistHRVSeries(_ series: [TimeSeriesPoint]) {
-        var inserted: [TimeSeriesPoint] = []
-        var updated: [TimeSeriesPoint] = []
-        for point in series {
-            if let existing = storedHRVSamples.first(where: { $0.timestamp == point.time }) {
-                existing.value = point.value
-                updated.append(point)
-            } else {
-                modelContext.insert(StoredHRVSample(timestamp: point.time, value: point.value))
-                inserted.append(point)
-            }
-        }
-        tLog("============ SWIFTDATA SAVE: HRV =============")
-        tLog("inserted: \(inserted.count), updated: \(updated.count), totalSeriesPoints: \(series.count)")
-        tLog("insertedPoints: \(formatSeriesPointsForLog(inserted))")
-        tLog("updatedPoints: \(formatSeriesPointsForLog(updated))")
-        do {
-            try modelContext.save()
-            tLog("result: SUCCESS")
-        } catch {
-            tLog("result: FAILED - \(error)")
-        }
-        tLog("==============================================")
-    }
-
-    private func persistBloodOxygenSeries(_ series: [TimeSeriesPoint]) {
-        var inserted: [TimeSeriesPoint] = []
-        var updated: [TimeSeriesPoint] = []
-        for point in series {
-            if let existing = storedBloodOxygenSamples.first(where: { $0.timestamp == point.time }) {
-                existing.value = point.value
-                updated.append(point)
-            } else {
-                modelContext.insert(StoredBloodOxygenSample(timestamp: point.time, value: point.value))
-                inserted.append(point)
-            }
-        }
-        tLog("====== SWIFTDATA SAVE: Blood Oxygen ======")
-        tLog("inserted: \(inserted.count), updated: \(updated.count), totalSeriesPoints: \(series.count)")
-        tLog("insertedPoints: \(formatSeriesPointsForLog(inserted))")
-        tLog("updatedPoints: \(formatSeriesPointsForLog(updated))")
-        do {
-            try modelContext.save()
-            tLog("result: SUCCESS")
-        } catch {
-            tLog("result: FAILED - \(error)")
-        }
-        tLog("==========================================")
-    }
-
-    private func persistStressSeries(_ series: [TimeSeriesPoint]) {
-        var inserted: [TimeSeriesPoint] = []
-        var updated: [TimeSeriesPoint] = []
-        for point in series {
-            if let existing = storedStressSamples.first(where: { $0.timestamp == point.time }) {
-                existing.value = point.value
-                updated.append(point)
-            } else {
-                modelContext.insert(StoredStressSample(timestamp: point.time, value: point.value))
-                inserted.append(point)
-            }
-        }
-        tLog("=========== SWIFTDATA SAVE: Stress ===========")
-        tLog("inserted: \(inserted.count), updated: \(updated.count), totalSeriesPoints: \(series.count)")
-        tLog("insertedPoints: \(formatSeriesPointsForLog(inserted))")
-        tLog("updatedPoints: \(formatSeriesPointsForLog(updated))")
-        do {
-            try modelContext.save()
-            tLog("result: SUCCESS")
-        } catch {
-            tLog("result: FAILED - \(error)")
-        }
-        tLog("==============================================")
-    }
-
-    private func swiftDataLogDate(_ date: Date) -> String {
-        Self.swiftDataLogDateFormatter.string(from: date)
-    }
-
-    private func formatSeriesPointsForLog(_ points: [TimeSeriesPoint]) -> String {
-        guard !points.isEmpty else { return "[]" }
-        let values = points.map { point in
-            "{time: \(swiftDataLogDate(point.time)), value: \(point.value)}"
-        }
-        return "[\(values.joined(separator: ", "))]"
-    }
-
-    private func decodeBigDataBloodOxygen(_ payload: [UInt8]) -> [TimeSeriesPoint] {
-        guard payload.count >= 4 else { return [] }
-
-        // Candidate A: concatenated day blocks.
-        // Seen on some firmware as repeated blocks in one payload (multi-day response).
-        // We support common block sizes and pick the decode with most valid points.
-        let multiDayCandidates = [50, 49, 48].compactMap { blockSize in
-            decodeBloodOxygenFixedBlocks(payload, blockSize: blockSize)
-        }
-        if let best = multiDayCandidates.max(by: { $0.count < $1.count }), best.count >= 24 {
-            return best
-        }
-
-        // Candidate B: documented single-day payload: [unk, daysAgo, (min,max)...]
-        let daysAgo = Int(payload[1])
-        let sampleBytes = Array(payload.dropFirst(2))
-        let singleDay = decodeBloodOxygenDaySamples(sampleBytes, daysAgo: daysAgo)
-        if !singleDay.isEmpty {
-            return singleDay
-        }
-
-        return []
-    }
-
-    private func decodeBloodOxygenFixedBlocks(_ payload: [UInt8], blockSize: Int) -> [TimeSeriesPoint]? {
-        guard blockSize >= 4, payload.count % blockSize == 0 else { return nil }
-        let blockCount = payload.count / blockSize
-        guard blockCount > 1 else { return nil }
-
-        var result: [TimeSeriesPoint] = []
-        var offset = 0
-        for _ in 0..<blockCount {
-            let block = Array(payload[offset..<(offset + blockSize)])
-            offset += blockSize
-            guard block.count >= 3 else { return nil }
-
-            let daysAgo = Int(block[1])
-            let dayBytes = Array(block.dropFirst(2))
-
-            // If odd-sized day bytes, treat first byte as optional count/marker and decode the remainder.
-            let normalized: [UInt8]
-            if dayBytes.count % 2 == 1, dayBytes.count > 3 {
-                normalized = Array(dayBytes.dropFirst())
-            } else {
-                normalized = dayBytes
-            }
-
-            let points = decodeBloodOxygenDaySamples(normalized, daysAgo: daysAgo)
-            if points.isEmpty { return nil }
-            result.append(contentsOf: points)
-        }
-        return result
-    }
-
-    private func decodeBloodOxygenDaySamples(_ sampleBytes: [UInt8], daysAgo: Int) -> [TimeSeriesPoint] {
-        guard sampleBytes.count >= 2 else { return [] }
-
-        // Primary: min/max pairs (hourly averages) as documented.
-        if sampleBytes.count % 2 == 0 {
-            var points: [TimeSeriesPoint] = []
-            var hour = 0
-            var i = 0
-            while i + 1 < sampleBytes.count, hour < 24 {
-                let minV = Double(sampleBytes[i])
-                let maxV = Double(sampleBytes[i + 1])
-                let avg = (minV + maxV) / 2.0
-                points.append(TimeSeriesPoint(time: dayAtHour(daysAgo: daysAgo, hour: hour), value: avg))
-                i += 2
-                hour += 1
-            }
-            return points.filter { $0.value > 0 }
-        }
-
-        // Fallback: single-value samples with 30-minute interval.
-        return sampleBytes.enumerated().map { idx, value in
-            let hour = idx / 2
-            let minute = (idx % 2) * 30
-            return TimeSeriesPoint(time: dayAtTime(daysAgo: daysAgo, hour: hour, minute: minute), value: Double(value))
-        }.filter { $0.value > 0 }
-    }
-
-    private func dayAtHour(daysAgo: Int, hour: Int) -> Date {
-        RingSlotTimestamp.date(daysAgo: daysAgo, hour: hour)
-    }
-
-    private func dayAtTime(daysAgo: Int, hour: Int, minute: Int) -> Date {
-        // For sub-hour precision (30-min SpO2 fallback), start from the UTC hour
-        // and add the minute offset.
-        let hourDate = RingSlotTimestamp.date(daysAgo: daysAgo, hour: hour)
-        return hourDate.addingTimeInterval(TimeInterval(max(0, min(59, minute)) * 60))
     }
 
     // MARK: - Summary helpers

@@ -38,21 +38,6 @@ struct HeartRateGraphView: View {
     }
 }
 
-struct HeartRateGraphContainerView: View {
-    @State private var data: [HeartRateDataPoint] = []
-
-    var body: some View {
-        VStack {
-            if data.isEmpty {
-                Text(L10n.HeartRateGraph.noDataAvailable)
-                    .foregroundColor(.gray)
-            } else {
-                HeartRateGraphView(data: data)
-            }
-        }
-    }
-}
-
 #Preview("Heart Rate (PreviewData)") {
     List {
         HeartRateGraphView(data: PreviewData.heartRatePoints)
