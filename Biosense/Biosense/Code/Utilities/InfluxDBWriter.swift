@@ -19,10 +19,14 @@ struct InfluxDBConfig {
     let demoBucket: String
     let token: String
 
-    /// Default config — reads from UserDefaults, falling back to Secrets.swift defaults.
+    private static let keychainService = "com.biosense.ring.influxdb"
+    private static let keychainAccount = "token"
+
+    /// Default config — reads token from Keychain (migrating from UserDefaults on
+    /// first launch after the upgrade), falling back to Secrets.swift defaults.
     static var saved: InfluxDBConfig? {
         let defaults = UserDefaults.standard
-        let token = defaults.string(forKey: "influxdb.token") ?? Secrets.influxDBToken
+        let token = resolveToken(defaults: defaults)
         guard !token.isEmpty else { return nil }
         return InfluxDBConfig(
             url: defaults.string(forKey: "influxdb.url") ?? Secrets.influxDBURL,
@@ -33,18 +37,42 @@ struct InfluxDBConfig {
         )
     }
 
-    /// Persist config to UserDefaults.
+    /// Persist config — token goes to Keychain, non-secret fields to UserDefaults.
     func save() {
         let defaults = UserDefaults.standard
         defaults.set(url, forKey: "influxdb.url")
         defaults.set(org, forKey: "influxdb.org")
         defaults.set(bucket, forKey: "influxdb.bucket")
-        defaults.set(token, forKey: "influxdb.token")
+        KeychainHelper.write(service: Self.keychainService, account: Self.keychainAccount, value: token)
+        // Remove legacy plaintext token from UserDefaults if present.
+        defaults.removeObject(forKey: "influxdb.token")
     }
 
     func writeURL(demo: Bool) -> URL? {
         let b = demo ? demoBucket : bucket
         return URL(string: "\(url)/api/v2/write?org=\(org)&bucket=\(b)&precision=s")
+    }
+
+    // MARK: - Token resolution (Keychain → UserDefaults migration → Secrets fallback)
+
+    private static func resolveToken(defaults: UserDefaults) -> String {
+        // 1. Keychain (preferred)
+        if let token = KeychainHelper.read(service: keychainService, account: keychainAccount), !token.isEmpty {
+            return token
+        }
+        // 2. One-time migration from UserDefaults (pre-Keychain builds)
+        if let legacy = defaults.string(forKey: "influxdb.token"), !legacy.isEmpty {
+            KeychainHelper.write(service: keychainService, account: keychainAccount, value: legacy)
+            defaults.removeObject(forKey: "influxdb.token")
+            tLog("[InfluxDB] Migrated token from UserDefaults to Keychain")
+            return legacy
+        }
+        // 3. Compiled-in default from Secrets.swift
+        let fallback = Secrets.influxDBToken
+        if !fallback.isEmpty {
+            KeychainHelper.write(service: keychainService, account: keychainAccount, value: fallback)
+        }
+        return fallback
     }
 }
 

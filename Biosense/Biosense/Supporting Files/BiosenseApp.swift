@@ -43,7 +43,7 @@ struct BiosenseApp: App {
                         )
                         coordinator.start()
                         ringDataPersistenceCoordinator = coordinator
-                        debugPrint("[AutoPersist] RingDataPersistenceCoordinator started")
+                        tLog("[AutoPersist] RingDataPersistenceCoordinator started")
                     }
                 }
         }
