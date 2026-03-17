@@ -252,19 +252,28 @@ struct ReadingsGraphsView: View {
             .map { TimeSeriesPoint(time: $0.timestamp, value: Double($0.calories)) }
     }
 
+    /// Shift a UTC-anchored Date to its local-time equivalent for chart display.
+    /// For example, 03:00 UTC in PST (UTC-8) becomes 03:00 local = 11:00 UTC,
+    /// so the chart x-axis reads "03" at the point that actually happened at 03:00 UTC.
+    /// This keeps InfluxDB/stored data in true UTC while showing local hours on chart axes.
+    private static func utcToLocalForDisplay(_ utcDate: Date) -> Date {
+        let offset = TimeInterval(TimeZone.current.secondsFromGMT(for: utcDate))
+        return utcDate.addingTimeInterval(offset)
+    }
+
     private var hrvData: [TimeSeriesPoint] {
         return selectedDayHRVSamples
-            .map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) }
+            .map { TimeSeriesPoint(time: Self.utcToLocalForDisplay($0.timestamp), value: $0.value) }
     }
 
     private var bloodOxygenData: [TimeSeriesPoint] {
         return selectedDayBloodOxygenSamples
-            .map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) }
+            .map { TimeSeriesPoint(time: Self.utcToLocalForDisplay($0.timestamp), value: $0.value) }
     }
 
     private var stressData: [TimeSeriesPoint] {
         return selectedDayStressSamples
-            .map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) }
+            .map { TimeSeriesPoint(time: Self.utcToLocalForDisplay($0.timestamp), value: $0.value) }
     }
 
     var body: some View {
@@ -284,6 +293,7 @@ struct ReadingsGraphsView: View {
             .listStyle(.insetGrouped)
             .navigationTitle(L10n.Graphs.navTitle)
             .navigationBarTitleDisplayMode(.large)
+            .refreshable { await refreshAllMetrics() }
             .simultaneousGesture(
                 DragGesture(minimumDistance: 50)
                     .onEnded { value in
@@ -700,7 +710,7 @@ struct ReadingsGraphsView: View {
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     } else {
-                        HRVChartView(data: hrvData)
+                        HRVChartView(data: hrvData, xDomain: selectedDayStart...selectedDayEnd)
                     }
                 case .week, .month:
                     if rangeHRVDaily.isEmpty {
@@ -730,7 +740,7 @@ struct ReadingsGraphsView: View {
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     } else {
-                        BloodOxygenChartView(data: bloodOxygenData)
+                        BloodOxygenChartView(data: bloodOxygenData, xDomain: selectedDayStart...selectedDayEnd)
                     }
                 case .week, .month:
                     if rangeBloodOxygenDaily.isEmpty {
@@ -760,7 +770,7 @@ struct ReadingsGraphsView: View {
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     } else {
-                        StressChartView(data: stressData)
+                        StressChartView(data: stressData, xDomain: selectedDayStart...selectedDayEnd)
                     }
                 case .week, .month:
                     if rangeStressDaily.isEmpty {
@@ -846,6 +856,18 @@ struct ReadingsGraphsView: View {
             ringSessionManager.syncBloodOxygen(dayOffset: 0)
             ringSessionManager.syncPressureData(dayOffset: 0)
         }
+    }
+
+    /// Pull-to-refresh: re-request today's data for all metrics from the ring.
+    private func refreshAllMetrics() async {
+        guard ringSessionManager.peripheralConnected else { return }
+        ringSessionManager.getHeartRateLog(dayOffset: 0) { _ in }
+        ringSessionManager.syncActivityData(dayOffset: 0)
+        ringSessionManager.syncHRVData(dayOffset: 0)
+        ringSessionManager.syncBloodOxygen(dayOffset: 0)
+        ringSessionManager.syncPressureData(dayOffset: 0)
+        // Give the ring time to respond before the spinner dismisses.
+        try? await Task.sleep(for: .seconds(2))
     }
 
     private func todayAtHour(_ hour: Int) -> Date {
@@ -1076,14 +1098,14 @@ struct ReadingsGraphsView: View {
     }
 
     private func dayAtHour(daysAgo: Int, hour: Int) -> Date {
-        dayAtTime(daysAgo: daysAgo, hour: hour, minute: 0)
+        RingSlotTimestamp.date(daysAgo: daysAgo, hour: hour)
     }
 
     private func dayAtTime(daysAgo: Int, hour: Int, minute: Int) -> Date {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        let day = calendar.date(byAdding: .day, value: -daysAgo, to: today) ?? today
-        return calendar.date(bySettingHour: max(0, min(23, hour)), minute: max(0, min(59, minute)), second: 0, of: day) ?? day
+        // For sub-hour precision (30-min SpO2 fallback), start from the UTC hour
+        // and add the minute offset.
+        let hourDate = RingSlotTimestamp.date(daysAgo: daysAgo, hour: hour)
+        return hourDate.addingTimeInterval(TimeInterval(max(0, min(59, minute)) * 60))
     }
 
     // MARK: - Summary helpers
