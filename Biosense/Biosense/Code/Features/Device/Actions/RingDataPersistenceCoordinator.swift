@@ -24,18 +24,7 @@ final class RingDataPersistenceCoordinator {
     }
 
     func start() {
-        // One-time cleanup: purge activity samples that were stored with wrong
-        // timestamps by the old parser (which ignored the date in ring packets
-        // and stamped everything as "today").  Safe to remove after a few releases.
-        purgeStaleActivitySamples()
-
-        // Backfill nightDate for sleep records migrated from schema without it.
-        backfillSleepNightDates()
-
-        // One-time: purge HR logs that were stored with wrong dayStart due to
-        // the race condition bug (single requestedDay variable overwritten by
-        // concurrent requests). Next sync will re-populate with correct dates.
-        purgeStaleHeartRateLogs()
+        SwiftDataMigrations.runAll(context: modelContext)
 
         ringSessionManager.bigDataSleepPersistenceCallback = { [weak self] sleepData in
             guard let self else { return }
@@ -221,77 +210,6 @@ final class RingDataPersistenceCoordinator {
         } else {
             tLog("[AutoPersist] HR log → InfluxDB: no non-zero readings")
         }
-    }
-
-    /// Delete all StoredActivitySample rows — the old parser stored every sample
-    /// with today's date regardless of actual date, so the DB is unreliable.
-    /// The next ring sync will repopulate with correctly-dated data.
-    private func purgeStaleHeartRateLogs() {
-        let key = "hrLogUTCMapFixPurgeV4"
-        guard !UserDefaults.standard.bool(forKey: key) else { return }
-
-        do {
-            let all = try modelContext.fetch(FetchDescriptor<StoredHeartRateLog>())
-            guard !all.isEmpty else {
-                UserDefaults.standard.set(true, forKey: key)
-                return
-            }
-            for log in all { modelContext.delete(log) }
-            try modelContext.save()
-            tLog("[HRLogMigration] Purged \(all.count) stale HR logs (dayStart race fix)")
-        } catch {
-            tLog("[HRLogMigration] Purge failed: \(error)")
-        }
-        UserDefaults.standard.set(true, forKey: key)
-    }
-
-    private func purgeStaleActivitySamples() {
-        let key = "activityParserV4Migrated"
-        guard !UserDefaults.standard.bool(forKey: key) else { return }
-
-        do {
-            let all = try modelContext.fetch(FetchDescriptor<StoredActivitySample>())
-            guard !all.isEmpty else {
-                UserDefaults.standard.set(true, forKey: key)
-                return
-            }
-            for sample in all { modelContext.delete(sample) }
-            try modelContext.save()
-            tLog("[ActivityMigration] Purged \(all.count) stale activity samples")
-        } catch {
-            tLog("[ActivityMigration] Purge failed: \(error)")
-        }
-        UserDefaults.standard.set(true, forKey: key)
-    }
-
-    /// Backfill `nightDate` for StoredSleepDay records created before the field existed.
-    /// After lightweight migration these rows have `Date.distantPast`; recompute from
-    /// `syncDate` and `daysAgo`.
-    private func backfillSleepNightDates() {
-        let key = "sleepNightDateBackfilled"
-        guard !UserDefaults.standard.bool(forKey: key) else { return }
-
-        do {
-            let sentinel = Date.distantPast
-            let descriptor = FetchDescriptor<StoredSleepDay>(
-                predicate: #Predicate<StoredSleepDay> { $0.nightDate == sentinel }
-            )
-            let stale = try modelContext.fetch(descriptor)
-            guard !stale.isEmpty else {
-                UserDefaults.standard.set(true, forKey: key)
-                return
-            }
-            let calendar = Calendar.current
-            for day in stale {
-                let base = calendar.startOfDay(for: day.syncDate)
-                day.nightDate = calendar.date(byAdding: .day, value: -day.daysAgo, to: base) ?? base
-            }
-            try modelContext.save()
-            tLog("[SleepMigration] Backfilled nightDate for \(stale.count) sleep records")
-        } catch {
-            tLog("[SleepMigration] Backfill failed: \(error)")
-        }
-        UserDefaults.standard.set(true, forKey: key)
     }
 
     // MARK: - Activity (CMD_GET_STEP_SOMEDAY / 0x43)
@@ -481,7 +399,7 @@ final class RingDataPersistenceCoordinator {
         tLog("[AutoPersist] Activity flush: updated \(totalUpdated), inserted \(totalInserted) across \(byDate.count) day(s)")
 
         if saveContext(tag: "Activity") {
-            // Group for HealthKit / InfluxDB writes
+            // Fan out to HealthKit + InfluxDB
             let hourlyByDate = Dictionary(grouping: batch) { $0.date }
             for (dayStart, slots) in hourlyByDate {
                 let hourlyBuckets = Dictionary(grouping: slots) { $0.hour }
@@ -534,12 +452,12 @@ final class RingDataPersistenceCoordinator {
         tLog("[AutoPersist] HRV save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "HRV")
 
-        // Always write all points — InfluxDB deduplicates by timestamp.
+        // Fan out to InfluxDB (deduplicates by timestamp)
         for point in series {
             influx.writeHRV(value: point.value, time: point.time)
         }
 
-        // Write HRV (SDNN) to HealthKit (SyncIdentifier deduplicates).
+        // Fan out to HealthKit (SyncIdentifier deduplicates)
         let hrvReadings = series.map { (sdnn: $0.value, time: $0.time) }
         Task { @MainActor in
             await healthHRWriter.writeHRVSeries(hrvReadings)
@@ -562,7 +480,7 @@ final class RingDataPersistenceCoordinator {
         tLog("[AutoPersist] Stress save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "Stress")
 
-        // Always write all points — InfluxDB deduplicates by timestamp.
+        // Fan out to InfluxDB (deduplicates by timestamp). No HealthKit equivalent for stress.
         for point in series {
             influx.writeStress(value: point.value, time: point.time)
         }
@@ -597,7 +515,7 @@ final class RingDataPersistenceCoordinator {
             let maxV = Double(sampleBytes[i])
             let minV = Double(sampleBytes[i + 1])
             let avg = (maxV + minV) / 2.0
-            let t = dayAtHour(daysAgo: daysAgo, hour: hour)
+            let t = RingSlotTimestamp.date(daysAgo: daysAgo, hour: hour)
             // Drop values below 80% (no data / ring not worn) and future timestamps
             // (stale ring data from slots past the current time).
             if avg >= 80, t <= now {
@@ -626,14 +544,12 @@ final class RingDataPersistenceCoordinator {
         tLog("[AutoPersist] Blood oxygen save requested. inserted=\(inserted) updated=\(updated) total=\(series.count)")
         _ = saveContext(tag: "BloodOxygen")
 
-        // Always write all points to InfluxDB (not just new inserts).
-        // InfluxDB deduplicates by timestamp, so re-sending is safe and
-        // ensures data reaches InfluxDB even on re-syncs / updates.
+        // Fan out to InfluxDB (deduplicates by timestamp)
         for point in series {
             influx.writeSpO2(value: point.value, time: point.time)
         }
 
-        // Write historical SpO2 to HealthKit (SyncIdentifier deduplicates).
+        // Fan out to HealthKit (SyncIdentifier deduplicates)
         let spo2Readings = series.map { (percent: $0.value, time: $0.time) }
         Task { @MainActor in
             await healthHRWriter.writeSpO2Series(spo2Readings)
@@ -655,13 +571,6 @@ final class RingDataPersistenceCoordinator {
         modelContext.insert(StoredBloodOxygenSample(timestamp: time, value: value))
         tLog("[AutoPersist] SpO2 spot-check \(percent)% at \(Self.logDateFormatter.string(from: time)) — saved to SwiftData")
         _ = saveContext(tag: "SpO2SpotCheck")
-    }
-
-    /// Build an absolute timestamp from a ring-reported daysAgo + UTC hour.
-    /// The ring indexes hours from UTC midnight, so we compute the UTC time
-    /// then return it as an absolute Date (correct for both chart and InfluxDB).
-    private func dayAtHour(daysAgo: Int, hour: Int) -> Date {
-        RingSlotTimestamp.date(daysAgo: daysAgo, hour: hour)
     }
 
     // MARK: - Shared

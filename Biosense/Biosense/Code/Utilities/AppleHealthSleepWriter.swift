@@ -3,55 +3,23 @@ import HealthKit
 
 @MainActor
 final class AppleHealthSleepWriter {
-    private let healthStore = HKHealthStore()
-    private var didRequestAuthorization = false
+    private let base = HealthKitBase()
+
+    private static let shareTypes: Set<HKSampleType> = [
+        HKObjectType.categoryType(forIdentifier: .sleepAnalysis)!
+    ]
 
     func writeSleepDays(_ days: [SleepDay], todayStart: Date) async {
         guard HKHealthStore.isHealthDataAvailable() else { return }
         guard !days.isEmpty else { return }
         do {
-            try await requestAuthorizationIfNeeded()
+            try await base.authorize(toShare: Self.shareTypes)
             let samples = makeSamples(days: days, todayStart: todayStart)
             guard !samples.isEmpty else { return }
-            try await save(samples)
+            try await base.saveSamples(samples)
             tLog("[HealthKit] Sleep samples written: \(samples.count)")
         } catch {
             tLog("[HealthKit] Failed to write sleep samples: \(error)")
-        }
-    }
-
-    private func requestAuthorizationIfNeeded() async throws {
-        guard !didRequestAuthorization else { return }
-        let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis)!
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            healthStore.requestAuthorization(toShare: [sleepType], read: []) { [weak self] success, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                guard success else {
-                    continuation.resume(throwing: NSError(domain: "AppleHealthSleepWriter", code: 1))
-                    return
-                }
-                self?.didRequestAuthorization = true
-                continuation.resume(returning: ())
-            }
-        }
-    }
-
-    private func save(_ samples: [HKCategorySample]) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            healthStore.save(samples) { success, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                guard success else {
-                    continuation.resume(throwing: NSError(domain: "AppleHealthSleepWriter", code: 2))
-                    return
-                }
-                continuation.resume(returning: ())
-            }
         }
     }
 

@@ -1,11 +1,20 @@
 import Foundation
 import HealthKit
 
-/// Writes heart rate and SpO2 samples to Apple Health from spot-checks
-/// and periodic readings (outside of gym workouts which have their own writer).
+/// Writes heart rate, SpO2, HRV, and temperature samples to Apple Health
+/// from spot-checks and periodic readings (outside of gym workouts which
+/// have their own writer).
 final class AppleHealthHeartRateWriter {
-    private let healthStore = HKHealthStore()
-    private var didRequestAuthorization = false
+    private let base = HealthKitBase()
+
+    private static let shareTypes: Set<HKSampleType> = [
+        HKQuantityType.quantityType(forIdentifier: .heartRate)!,
+        HKQuantityType.quantityType(forIdentifier: .oxygenSaturation)!,
+        HKQuantityType.quantityType(forIdentifier: .bodyTemperature)!,
+        HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN)!,
+    ]
+
+    // MARK: - Single-reading writes (spot-checks / real-time)
 
     /// Write a single heart rate reading to HealthKit.
     func writeHeartRate(bpm: Int, time: Date) async {
@@ -13,22 +22,16 @@ final class AppleHealthHeartRateWriter {
         guard bpm > 0, bpm <= 220 else { return }
 
         do {
-            try await requestAuthorizationIfNeeded()
+            try await base.authorize(toShare: Self.shareTypes)
             let hrType = HKQuantityType.quantityType(forIdentifier: .heartRate)!
             let unit = HKUnit.count().unitDivided(by: .minute())
-            let quantity = HKQuantity(unit: unit, doubleValue: Double(bpm))
-            let metadata: [String: Any] = [
-                HKMetadataKeySyncIdentifier: "halo.hr.\(Int(time.timeIntervalSince1970))",
-                HKMetadataKeySyncVersion: 1
-            ]
             let sample = HKQuantitySample(
                 type: hrType,
-                quantity: quantity,
-                start: time,
-                end: time,
-                metadata: metadata
+                quantity: HKQuantity(unit: unit, doubleValue: Double(bpm)),
+                start: time, end: time,
+                metadata: syncMeta("halo.hr.\(Int(time.timeIntervalSince1970))")
             )
-            try await save([sample])
+            try await base.saveSamples([sample])
             tLog("[HealthKit/HR] Heart rate \(bpm) bpm written")
         } catch {
             tLog("[HealthKit/HR] Failed to write heart rate: \(error)")
@@ -41,50 +44,62 @@ final class AppleHealthHeartRateWriter {
         guard percent > 0, percent <= 100 else { return }
 
         do {
-            try await requestAuthorizationIfNeeded()
+            try await base.authorize(toShare: Self.shareTypes)
             let spo2Type = HKQuantityType.quantityType(forIdentifier: .oxygenSaturation)!
-            let quantity = HKQuantity(unit: .percent(), doubleValue: Double(percent) / 100.0)
-            let metadata: [String: Any] = [
-                HKMetadataKeySyncIdentifier: "halo.spo2.\(Int(time.timeIntervalSince1970))",
-                HKMetadataKeySyncVersion: 1
-            ]
             let sample = HKQuantitySample(
                 type: spo2Type,
-                quantity: quantity,
-                start: time,
-                end: time,
-                metadata: metadata
+                quantity: HKQuantity(unit: .percent(), doubleValue: Double(percent) / 100.0),
+                start: time, end: time,
+                metadata: syncMeta("halo.spo2.\(Int(time.timeIntervalSince1970))")
             )
-            try await save([sample])
+            try await base.saveSamples([sample])
             tLog("[HealthKit/SpO2] SpO2 \(percent)% written")
         } catch {
             tLog("[HealthKit/SpO2] Failed to write SpO2: \(error)")
         }
     }
 
+    /// Write a single body temperature reading to HealthKit.
+    func writeTemperature(celsius: Double, time: Date) async {
+        guard HKHealthStore.isHealthDataAvailable() else { return }
+        guard celsius > 30.0, celsius < 45.0 else { return }
+
+        do {
+            try await base.authorize(toShare: Self.shareTypes)
+            let tempType = HKQuantityType.quantityType(forIdentifier: .bodyTemperature)!
+            let sample = HKQuantitySample(
+                type: tempType,
+                quantity: HKQuantity(unit: .degreeCelsius(), doubleValue: celsius),
+                start: time, end: time,
+                metadata: syncMeta("halo.temp.\(Int(time.timeIntervalSince1970))")
+            )
+            try await base.saveSamples([sample])
+            tLog("[HealthKit/Temp] Body temperature \(celsius)°C written")
+        } catch {
+            tLog("[HealthKit/Temp] Failed to write temperature: \(error)")
+        }
+    }
+
+    // MARK: - Batch writes (historical syncs)
+
     /// Write a batch of heart rate readings from the ring's historical HR log.
-    /// Each (bpm, time) pair becomes a point sample. Uses SyncIdentifier for dedup.
     func writeHeartRateLog(_ readings: [(bpm: Int, time: Date)]) async {
         let valid = readings.filter { $0.bpm > 0 && $0.bpm <= 220 }
         guard !valid.isEmpty, HKHealthStore.isHealthDataAvailable() else { return }
 
         do {
-            try await requestAuthorizationIfNeeded()
+            try await base.authorize(toShare: Self.shareTypes)
             let hrType = HKQuantityType.quantityType(forIdentifier: .heartRate)!
             let unit = HKUnit.count().unitDivided(by: .minute())
             let samples = valid.map { reading in
                 HKQuantitySample(
                     type: hrType,
                     quantity: HKQuantity(unit: unit, doubleValue: Double(reading.bpm)),
-                    start: reading.time,
-                    end: reading.time,
-                    metadata: [
-                        HKMetadataKeySyncIdentifier: "biosense.hr.log.\(Int(reading.time.timeIntervalSince1970))",
-                        HKMetadataKeySyncVersion: 1
-                    ]
+                    start: reading.time, end: reading.time,
+                    metadata: syncMeta("biosense.hr.log.\(Int(reading.time.timeIntervalSince1970))")
                 )
             }
-            try await save(samples)
+            try await base.saveSamples(samples)
             tLog("[HealthKit/HR] HR log batch: \(samples.count) readings written")
         } catch {
             tLog("[HealthKit/HR] HR log batch failed: \(error)")
@@ -97,21 +112,17 @@ final class AppleHealthHeartRateWriter {
         guard !valid.isEmpty, HKHealthStore.isHealthDataAvailable() else { return }
 
         do {
-            try await requestAuthorizationIfNeeded()
+            try await base.authorize(toShare: Self.shareTypes)
             let spo2Type = HKQuantityType.quantityType(forIdentifier: .oxygenSaturation)!
             let samples = valid.map { reading in
                 HKQuantitySample(
                     type: spo2Type,
                     quantity: HKQuantity(unit: .percent(), doubleValue: reading.percent / 100.0),
-                    start: reading.time,
-                    end: reading.time,
-                    metadata: [
-                        HKMetadataKeySyncIdentifier: "biosense.spo2.log.\(Int(reading.time.timeIntervalSince1970))",
-                        HKMetadataKeySyncVersion: 1
-                    ]
+                    start: reading.time, end: reading.time,
+                    metadata: syncMeta("biosense.spo2.log.\(Int(reading.time.timeIntervalSince1970))")
                 )
             }
-            try await save(samples)
+            try await base.saveSamples(samples)
             tLog("[HealthKit/SpO2] SpO2 series batch: \(samples.count) readings written")
         } catch {
             tLog("[HealthKit/SpO2] SpO2 series batch failed: \(error)")
@@ -124,92 +135,30 @@ final class AppleHealthHeartRateWriter {
         guard !valid.isEmpty, HKHealthStore.isHealthDataAvailable() else { return }
 
         do {
-            try await requestAuthorizationIfNeeded()
+            try await base.authorize(toShare: Self.shareTypes)
             let hrvType = HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN)!
             let unit = HKUnit.secondUnit(with: .milli)
             let samples = valid.map { reading in
                 HKQuantitySample(
                     type: hrvType,
                     quantity: HKQuantity(unit: unit, doubleValue: reading.sdnn),
-                    start: reading.time,
-                    end: reading.time,
-                    metadata: [
-                        HKMetadataKeySyncIdentifier: "biosense.hrv.log.\(Int(reading.time.timeIntervalSince1970))",
-                        HKMetadataKeySyncVersion: 1
-                    ]
+                    start: reading.time, end: reading.time,
+                    metadata: syncMeta("biosense.hrv.log.\(Int(reading.time.timeIntervalSince1970))")
                 )
             }
-            try await save(samples)
+            try await base.saveSamples(samples)
             tLog("[HealthKit/HRV] HRV series batch: \(samples.count) readings written")
         } catch {
             tLog("[HealthKit/HRV] HRV series batch failed: \(error)")
         }
     }
 
-    /// Write a single body temperature reading to HealthKit.
-    func writeTemperature(celsius: Double, time: Date) async {
-        guard HKHealthStore.isHealthDataAvailable() else { return }
-        guard celsius > 30.0, celsius < 45.0 else { return }
+    // MARK: - Helpers
 
-        do {
-            try await requestAuthorizationIfNeeded()
-            let tempType = HKQuantityType.quantityType(forIdentifier: .bodyTemperature)!
-            let quantity = HKQuantity(unit: .degreeCelsius(), doubleValue: celsius)
-            let metadata: [String: Any] = [
-                HKMetadataKeySyncIdentifier: "halo.temp.\(Int(time.timeIntervalSince1970))",
-                HKMetadataKeySyncVersion: 1
-            ]
-            let sample = HKQuantitySample(
-                type: tempType,
-                quantity: quantity,
-                start: time,
-                end: time,
-                metadata: metadata
-            )
-            try await save([sample])
-            tLog("[HealthKit/Temp] Body temperature \(celsius)°C written")
-        } catch {
-            tLog("[HealthKit/Temp] Failed to write temperature: \(error)")
-        }
-    }
-
-    // MARK: - Private
-
-    private func requestAuthorizationIfNeeded() async throws {
-        guard !didRequestAuthorization else { return }
-        let hrType = HKObjectType.quantityType(forIdentifier: .heartRate)!
-        let spo2Type = HKObjectType.quantityType(forIdentifier: .oxygenSaturation)!
-        let tempType = HKObjectType.quantityType(forIdentifier: .bodyTemperature)!
-        let hrvType = HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN)!
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            healthStore.requestAuthorization(toShare: [hrType, spo2Type, tempType, hrvType], read: []) { [weak self] success, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                guard success else {
-                    continuation.resume(throwing: NSError(domain: "AppleHealthHeartRateWriter", code: 1))
-                    return
-                }
-                self?.didRequestAuthorization = true
-                continuation.resume(returning: ())
-            }
-        }
-    }
-
-    private func save(_ samples: [HKQuantitySample]) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            healthStore.save(samples) { success, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                guard success else {
-                    continuation.resume(throwing: NSError(domain: "AppleHealthHeartRateWriter", code: 2))
-                    return
-                }
-                continuation.resume(returning: ())
-            }
-        }
+    private func syncMeta(_ identifier: String) -> [String: Any] {
+        [
+            HKMetadataKeySyncIdentifier: identifier,
+            HKMetadataKeySyncVersion: 1
+        ]
     }
 }
