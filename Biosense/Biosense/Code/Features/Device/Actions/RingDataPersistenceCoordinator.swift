@@ -10,6 +10,7 @@ final class RingDataPersistenceCoordinator {
     private var stressSeriesAccumulator = SplitSeriesPacketParser.SeriesAccumulator()
     private let healthSleepWriter = AppleHealthSleepWriter()
     private let healthActivityWriter = AppleHealthActivityWriter()
+    private let healthHRWriter = AppleHealthHeartRateWriter()
     private let influx = InfluxDBWriter.shared
 
     private static let logDateFormatter = ISO8601DateFormatter()
@@ -212,6 +213,11 @@ final class RingDataPersistenceCoordinator {
         if !readings.isEmpty {
             tLog("[AutoPersist] HR log → InfluxDB: \(readings.count) non-zero readings (UTC-anchored)")
             influx.writeHeartRates(readings.map { (bpm: $0.0, time: $0.1) })
+
+            // Also write to HealthKit so Apple Health reflects the full HR history.
+            Task { @MainActor in
+                await healthHRWriter.writeHeartRateLog(readings.map { (bpm: $0.0, time: $0.1) })
+            }
         } else {
             tLog("[AutoPersist] HR log → InfluxDB: no non-zero readings")
         }
@@ -532,6 +538,12 @@ final class RingDataPersistenceCoordinator {
         for point in series {
             influx.writeHRV(value: point.value, time: point.time)
         }
+
+        // Write HRV (SDNN) to HealthKit (SyncIdentifier deduplicates).
+        let hrvReadings = series.map { (sdnn: $0.value, time: $0.time) }
+        Task { @MainActor in
+            await healthHRWriter.writeHRVSeries(hrvReadings)
+        }
     }
 
     private func persistStressSeries(_ series: [TimeSeriesPoint]) {
@@ -619,6 +631,12 @@ final class RingDataPersistenceCoordinator {
         // ensures data reaches InfluxDB even on re-syncs / updates.
         for point in series {
             influx.writeSpO2(value: point.value, time: point.time)
+        }
+
+        // Write historical SpO2 to HealthKit (SyncIdentifier deduplicates).
+        let spo2Readings = series.map { (percent: $0.value, time: $0.time) }
+        Task { @MainActor in
+            await healthHRWriter.writeSpO2Series(spo2Readings)
         }
     }
 
