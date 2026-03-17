@@ -178,8 +178,16 @@ struct HeartRateLog {
     }
 }
 
-// NoData Class
-class NoData {}
+/// Result of parsing one HR log packet. The ring sends multi-packet
+/// responses; the parser accumulates until the full log is assembled.
+enum HeartRateLogParseResult {
+    /// Intermediate packet — parser is still accumulating.
+    case assembling
+    /// Ring has no data for this day (subType 0xFF).
+    case noData
+    /// Full log assembled and ready for persistence.
+    case complete(HeartRateLog)
+}
 
 // HeartRateLogParser Class
 class HeartRateLogParser {
@@ -213,23 +221,23 @@ class HeartRateLogParser {
     // The second byte is the subtype (the how manieth packet out of the total size)
     // The third until fifteenth byte are the data (13 bytes)
     // The last byte is the checksum
-    func parse(packet: [UInt8]) -> Any? {
-        guard packet.count >= 16 else { return nil }
+    func parse(packet: [UInt8]) -> HeartRateLogParseResult {
+        guard packet.count >= 16 else { return .assembling }
         let subType = packet[1]
-        
+
         let dataSize = 13
-        
+
         tLog(packet)
         allPackets += packet
-        
+
         if subType == 255 {
             tLog("[HRL] Ring returned no data for this day (subType=0xFF)")
             reset()
-            return NoData()
+            return .noData
         }
-        
+
         if isToday() && subType == 23 {
-            guard let timestamp = timestamp else { return nil }
+            guard let timestamp = timestamp else { return .assembling }
             let log = HeartRateLog(
                 heartRates: heartRates,
                 allPackets: allPackets,
@@ -239,25 +247,25 @@ class HeartRateLogParser {
                 range: range
             )
             reset()
-            return log
+            return .complete(log)
         }
-        
+
         if subType == 0 {
             end = false
-            
+
             size = Int(packet[2])
             tLog("Measurements of the last \(size) hours.")
-            
+
             range = Int(packet[3])
             tLog("Measured every \(range) minutes")
-            
+
             rawHeartRates = Array(repeating: -1, count: size * dataSize)
-            return nil
+            return .assembling
         } else if subType == 1 {
             // Safely extract timestamp using timestampToDate
             let ts = extractTimestamp(from: packet)
             timestamp = timestampToDate(timestamp: ts)
-            
+
             // Safely replace subrange of rawHeartRates
             let startRange = 0..<9
             let packetRange = 6..<15
@@ -267,7 +275,7 @@ class HeartRateLogParser {
                 tLog("Error: Subrange replacement out of bounds. RawHeartRates count: \(rawHeartRates.count), startRange: \(startRange), packetRange: \(packetRange)")
             }
             index += 9
-            return nil
+            return .assembling
         } else {
             let startIndex = index
             let endIndex = index + 13
@@ -285,9 +293,9 @@ class HeartRateLogParser {
                     range: range
                 )
                 reset()
-                return log
+                return .complete(log)
             }
-            return nil
+            return .assembling
         }
     }
     

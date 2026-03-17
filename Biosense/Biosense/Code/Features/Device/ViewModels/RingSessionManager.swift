@@ -9,65 +9,6 @@ import Foundation
 import CoreBluetooth
 import SwiftUI
 
-/// Settings-protocol tracking toggles (READ/WRITE isEnabled) shared by HRV, Heart Rate, Blood Oxygen, Pressure.
-enum RingTrackingSetting: CaseIterable {
-    case hrv           // command 56
-    case heartRate     // command 22
-    case bloodOxygen   // command 44
-    case pressure      // command 54 (Stress)
-
-    var commandId: UInt8 {
-        switch self {
-        case .hrv: return 56
-        case .heartRate: return 22
-        case .bloodOxygen: return 44
-        case .pressure: return 54
-        }
-    }
-
-    /// Maps response commandId back to setting; nil if not a tracking-setting command.
-    init?(commandId: UInt8) {
-        switch commandId {
-        case 56: self = .hrv
-        case 22: self = .heartRate
-        case 44: self = .bloodOxygen
-        case 54: self = .pressure
-        default: return nil
-        }
-    }
-
-    var displayName: String {
-        switch self {
-        case .hrv: return "HRV"
-        case .heartRate: return "Heart Rate"
-        case .bloodOxygen: return "Blood Oxygen"
-        case .pressure: return "Pressure (Stress)"
-        }
-    }
-}
-
-/// Unified PPG sensor state.  The ring has a single VC30F sensor shared by
-/// HR, SpO2, and temperature — only one measurement can run at a time.
-/// This enum replaces the scattered boolean flags that previously tracked
-/// which mode the sensor was in.
-enum SensorState: Equatable, CustomStringConvertible {
-    case idle
-    case spotCheck(RealTimeReading)   // brief measurement, auto-stops
-    case continuousHR                  // user-toggled from home screen
-    case spo2Stream                    // SpO2 with 2s continue keepalives
-    case workout                       // gym session owns the sensor
-
-    var description: String {
-        switch self {
-        case .idle: return "idle"
-        case .spotCheck(let type): return "spotCheck(\(type))"
-        case .continuousHR: return "continuousHR"
-        case .spo2Stream: return "spo2Stream"
-        case .workout: return "workout"
-        }
-    }
-}
-
 private let savedRingIdentifierKey = "savedRingIdentifier"
 private let savedRingDisplayNameKey = "savedRingDisplayName"
 private let preferredDataTimeZoneIdentifierKey = "preferredDataTimeZoneIdentifier"
@@ -296,13 +237,8 @@ class RingSessionManager: NSObject {
     var hrLogIntervalMinutes: Int?
     /// HR log enabled state reported by the ring. nil = not yet queried.
     var hrLogEnabled: Bool?
-    /// Pending continuation for HR log settings read.
-    private var pendingHRLogSettingsContinuation: CheckedContinuation<(enabled: Bool, intervalMinutes: Int), Error>?
-    /// Single callback or continuation for any in-flight tracking setting READ; cleared after use.
-    private var pendingTrackingSetting: RingTrackingSetting?
-    private var pendingTrackingSettingCallback: ((Bool) -> Void)?
-    private var pendingTrackingSettingContinuation: CheckedContinuation<Bool, Error>?
-    private var trackingSettingGeneration: UInt = 0
+    /// Manages async tracking-setting and HR log setting read/write with continuations.
+    private let trackingSettings = RingTrackingSettingsManager()
     /// Last requested dayOffset for sleep (0 = today); used when parsing response 68.
     private var lastSleepDayOffset: Int = 0
     /// Big Data notify buffer (variable-length responses may arrive in chunks).
@@ -348,6 +284,34 @@ class RingSessionManager: NSObject {
             queue: nil,
             options: [CBCentralManagerOptionRestoreIdentifierKey: "com.halo.ring-central"]
         )
+
+        // Wire tracking settings manager callbacks
+        trackingSettings.isConnected = { [weak self] in
+            self?.uartRxCharacteristic != nil && self?.peripheral != nil
+        }
+        trackingSettings.sendPacket = { [weak self] packet in
+            self?.sendPacket(packet: packet)
+        }
+        trackingSettings.sendSettingsPacket = { [weak self] commandId, action, data in
+            guard let self, let uartRx = self.uartRxCharacteristic, let peripheral = self.peripheral else {
+                tLog("Cannot send settings packet. Peripheral or characteristic not ready.")
+                return
+            }
+            do {
+                let packet = try makeSettingsPacket(commandId: commandId, action: action, data: data)
+                self.appendToDebugLog(direction: .sent, bytes: packet)
+                peripheral.writeValue(Data(packet), for: uartRx, type: .withResponse)
+            } catch {
+                tLog("Failed to create settings packet: \(error)")
+            }
+        }
+        trackingSettings.appendToDebugLog = { [weak self] direction, bytes in
+            self?.appendToDebugLog(direction: direction, bytes: bytes)
+        }
+        trackingSettings.onHRLogSettingsUpdated = { [weak self] enabled, interval in
+            self?.hrLogEnabled = enabled
+            self?.hrLogIntervalMinutes = interval
+        }
 
         // When the app returns to foreground (phone unlocked), trigger a reconnect
         // if needed and run a sync + spot-check for a fresh InfluxDB reading.
@@ -719,24 +683,9 @@ extension RingSessionManager: CBCentralManagerDelegate {
         spotCheckChainWorkItems.forEach { $0.cancel() }
         spotCheckChainWorkItems.removeAll()
 
-        // Resume any pending tracking-setting continuation so the caller
-        // doesn't hang forever.  The generation counter ensures a stale
-        // timeout DispatchWorkItem won't double-resume later.
-        if let continuation = pendingTrackingSettingContinuation {
-            tLog("[Disconnect] Resuming leaked tracking-setting continuation")
-            pendingTrackingSettingContinuation = nil
-            pendingTrackingSetting = nil
-            trackingSettingGeneration &+= 1
-            continuation.resume(throwing: RingSessionTrackingError.notConnected)
-        }
-        pendingTrackingSettingCallback = nil
-
-        // Same for HR log settings continuation.
-        if let continuation = pendingHRLogSettingsContinuation {
-            tLog("[Disconnect] Resuming leaked HR-log-settings continuation")
-            pendingHRLogSettingsContinuation = nil
-            continuation.resume(throwing: RingSessionTrackingError.notConnected)
-        }
+        // Resume any pending tracking/HR-log-settings continuations so callers
+        // don't hang forever.
+        trackingSettings.cancelPendingRequests()
 
         // Clear stale one-shot callbacks — if the ring disconnects before
         // responding, these closures would hold references indefinitely.
@@ -886,7 +835,7 @@ extension RingSessionManager: CBPeripheralDelegate {
         case CMD.cmdReadHeartRate:
             handleHeartRateLogResponse(packet: packet)
         case CMD.cmdHRTimingMonitor:
-            handleHRTimingMonitorResponse(packet: packet)
+            trackingSettings.handleHRTimingMonitorResponse(packet: packet)
         case Counter.shared.CMD_X:
             tLog("🔥")
         case CMD.cmdStartRealTime:
@@ -1077,7 +1026,7 @@ extension RingSessionManager: CBPeripheralDelegate {
              CMD.cmdHeartRateSetting,
              CMD.cmdBloodOxygen,
              CMD.cmdPressureSetting:
-            handleTrackingSettingResponse(packet: packet)
+            trackingSettings.handleTrackingSettingResponse(packet: packet)
         case CMD.cmdSportRealTime:
             handleSportRealTimeResponse(packet: packet)
         case CMD.cmdRealTimeHeartRateAck: // 0x9E — ack from CMD_REAL_TIME_HEART_RATE (30+128)
@@ -2184,192 +2133,27 @@ extension RingSessionManager {
     }
 }
 
-// MARK: - Tracking settings (Settings protocol: HRV, Heart Rate, Blood Oxygen, Pressure)
-
-// Settings protocol actions are in RingConstants.CMD.settingsActionRead / .CMD.settingsActionWrite
-
-enum RingSessionTrackingError: Error {
-    case notConnected
-    case timeout
-}
+// MARK: - Tracking Settings & HR Log Settings (delegated to RingTrackingSettingsManager)
 
 extension RingSessionManager {
-    /// Request current enabled state for one tracking setting (Settings protocol READ).
     func getTrackingSetting(_ setting: RingTrackingSetting, completion: @escaping (Bool) -> Void) {
-        pendingTrackingSetting = setting
-        pendingTrackingSettingCallback = completion
-        sendSettingRead(commandId: setting.commandId)
+        trackingSettings.getTrackingSetting(setting, completion: completion)
     }
 
-    /// Read one tracking setting from the ring (async); throws if not connected or times out after trackingSettingTimeout.
     func readTrackingSetting(_ setting: RingTrackingSetting) async throws -> Bool {
-        try await withCheckedThrowingContinuation { continuation in
-            guard uartRxCharacteristic != nil, peripheral != nil else {
-                continuation.resume(throwing: RingSessionTrackingError.notConnected)
-                return
-            }
-            trackingSettingGeneration &+= 1
-            let gen = trackingSettingGeneration
-            pendingTrackingSetting = setting
-            pendingTrackingSettingContinuation = continuation
-            sendSettingRead(commandId: setting.commandId)
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.trackingSettingTimeout) { [weak self] in
-                guard let self, self.trackingSettingGeneration == gen, self.pendingTrackingSettingContinuation != nil else { return }
-                tLog("[TrackingSetting] Timeout waiting for \(setting.displayName) read response")
-                self.pendingTrackingSettingContinuation = nil
-                self.pendingTrackingSetting = nil
-                continuation.resume(throwing: RingSessionTrackingError.timeout)
-            }
-        }
+        try await trackingSettings.readTrackingSetting(setting)
     }
 
-    /// Write one tracking setting to the ring (async); throws if not connected or times out after trackingSettingTimeout.
     func writeTrackingSetting(_ setting: RingTrackingSetting, enabled: Bool) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
-            guard uartRxCharacteristic != nil, peripheral != nil else {
-                continuation.resume(throwing: RingSessionTrackingError.notConnected)
-                return
-            }
-            trackingSettingGeneration &+= 1
-            let gen = trackingSettingGeneration
-            pendingTrackingSetting = setting
-            pendingTrackingSettingContinuation = continuation
-            sendSettingWrite(commandId: setting.commandId, isEnabled: enabled)
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.trackingSettingTimeout) { [weak self] in
-                guard let self, self.trackingSettingGeneration == gen, self.pendingTrackingSettingContinuation != nil else { return }
-                tLog("[TrackingSetting] Timeout waiting for \(setting.displayName) write response — assuming success")
-                self.pendingTrackingSettingContinuation = nil
-                self.pendingTrackingSetting = nil
-                continuation.resume(returning: enabled)
-            }
-        }
+        try await trackingSettings.writeTrackingSetting(setting, enabled: enabled)
     }
 
-    private func handleTrackingSettingResponse(packet: [UInt8]) {
-        guard packet.count >= 3 else { return }
-        let setting = RingTrackingSetting(commandId: packet[0])
-        guard let setting, setting == pendingTrackingSetting else { return }
-        let isEnabled = packet[2] != 0
-        if let continuation = pendingTrackingSettingContinuation {
-            pendingTrackingSettingContinuation = nil
-            pendingTrackingSetting = nil
-            continuation.resume(returning: isEnabled)
-        } else {
-            pendingTrackingSettingCallback?(isEnabled)
-            pendingTrackingSetting = nil
-            pendingTrackingSettingCallback = nil
-        }
-    }
-
-    private func sendSettingRead(commandId: UInt8) {
-        guard let uartRxCharacteristic, let peripheral else {
-            tLog("Cannot send settings request. Peripheral or characteristic not ready.")
-            return
-        }
-        do {
-            let data = [UInt8](repeating: 0, count: 13)
-            let packet = try makeSettingsPacket(commandId: commandId, action: CMD.settingsActionRead, data: data)
-            appendToDebugLog(direction: .sent, bytes: packet)
-            peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
-        } catch {
-            tLog("Failed to create settings packet: \(error)")
-        }
-    }
-
-    private func sendSettingWrite(commandId: UInt8, isEnabled: Bool) {
-        guard let uartRxCharacteristic, let peripheral else {
-            tLog("Cannot send settings write. Peripheral or characteristic not ready.")
-            return
-        }
-        do {
-            var data = [UInt8](repeating: 0, count: 13)
-            data[0] = isEnabled ? 1 : 0
-            let packet = try makeSettingsPacket(commandId: commandId, action: CMD.settingsActionWrite, data: data)
-            appendToDebugLog(direction: .sent, bytes: packet)
-            peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
-        } catch {
-            tLog("Failed to create settings write packet: \(error)")
-        }
-    }
-}
-
-// MARK: - HR Log Settings (Timing Monitor: interval + enabled)
-
-extension RingSessionManager {
-    /// Read the current HR log settings (enabled + interval) from the ring.
     func readHRLogSettings() async throws -> (enabled: Bool, intervalMinutes: Int) {
-        try await withCheckedThrowingContinuation { continuation in
-            guard uartRxCharacteristic != nil, peripheral != nil else {
-                continuation.resume(throwing: RingSessionTrackingError.notConnected)
-                return
-            }
-            pendingHRLogSettingsContinuation = continuation
-            do {
-                // Read: send command 0x16 with all-zero subdata
-                let packet = try makePacket(command: CMD.cmdHRTimingMonitor)
-                appendToDebugLog(direction: .sent, bytes: packet)
-                sendPacket(packet: packet)
-            } catch {
-                pendingHRLogSettingsContinuation = nil
-                continuation.resume(throwing: error)
-                return
-            }
-
-            // Safety timeout — if the ring never responds, resume with error
-            // so the caller doesn't hang forever.
-            DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.trackingSettingTimeout) { [weak self] in
-                guard let self, let continuation = self.pendingHRLogSettingsContinuation else { return }
-                tLog("[HRLogSettings] Timeout waiting for read response")
-                self.pendingHRLogSettingsContinuation = nil
-                continuation.resume(throwing: RingSessionTrackingError.timeout)
-            }
-        }
+        try await trackingSettings.readHRLogSettings()
     }
 
-    /// Write HR log settings to the ring: enabled state + interval in minutes (1–10).
     func writeHRLogSettings(enabled: Bool, intervalMinutes: Int) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            guard uartRxCharacteristic != nil, peripheral != nil else {
-                continuation.resume(throwing: RingSessionTrackingError.notConnected)
-                return
-            }
-            do {
-                var subData: [UInt8] = [
-                    enabled ? 1 : 0,
-                    UInt8(clamping: intervalMinutes)
-                ]
-                // Pad to fit standard packet (14 bytes subdata max, we only need 2)
-                let packet = try makePacket(command: CMD.cmdHRTimingMonitor, subData: subData)
-                appendToDebugLog(direction: .sent, bytes: packet)
-                sendPacket(packet: packet)
-                // Update local state immediately (ring doesn't always echo back on write)
-                hrLogEnabled = enabled
-                hrLogIntervalMinutes = intervalMinutes
-                tLog("[HRLogSettings] Wrote enabled=\(enabled), interval=\(intervalMinutes)min")
-                continuation.resume()
-            } catch {
-                continuation.resume(throwing: error)
-            }
-        }
-    }
-
-    private func handleHRTimingMonitorResponse(packet: [UInt8]) {
-        guard packet.count >= 3, packet[0] == CMD.cmdHRTimingMonitor else {
-            tLog("[HRLogSettings] Invalid HR timing monitor packet: \(packet)")
-            return
-        }
-        let enabled = packet[1] != 0
-        let interval = Int(packet[2])
-        hrLogEnabled = enabled
-        hrLogIntervalMinutes = interval
-        tLog("[HRLogSettings] Response: enabled=\(enabled), interval=\(interval)min")
-
-        if let continuation = pendingHRLogSettingsContinuation {
-            pendingHRLogSettingsContinuation = nil
-            continuation.resume(returning: (enabled: enabled, intervalMinutes: interval))
-        }
+        try await trackingSettings.writeHRLogSettings(enabled: enabled, intervalMinutes: intervalMinutes)
     }
 }
 
@@ -2420,23 +2204,19 @@ extension RingSessionManager {
             return
         }
 
-        let parsed = hrp.parse(packet: packet)
+        let result = hrp.parse(packet: packet)
 
-        // parse() returns:
-        //   nil       → intermediate packet (multi-packet log still assembling) — do NOT dequeue
-        //   NoData    → ring has no data for this day (subType 0xFF) — dequeue & skip
-        //   HeartRateLog → complete log assembled — dequeue & persist
-        if parsed is NoData {
-            // NoData has no timestamp — we can't look up the map entry here,
-            // but that's fine since there's nothing to persist.
+        switch result {
+        case .assembling:
+            return
+        case .noData:
             tLog("[HRL] No data from ring (subType=0xFF), map=\(heartRateLogUTCToLocalDay.count)")
             return
+        case .complete:
+            break
         }
 
-        guard let log = parsed as? HeartRateLog else {
-            // Intermediate packet — still assembling
-            return
-        }
+        guard case .complete(let log) = result else { return }
 
         // Look up the local day from our UTC→local map using the ring's timestamp.
         // The ring echoes back the UTC midnight we requested, so this is a direct key match.
