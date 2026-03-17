@@ -306,9 +306,9 @@ class RingSessionManager: NSObject {
 
     var batteryStatusCallback: ((BatteryInfo) -> Void)?
     var heartRateLogCallback: ((HeartRateLog) -> Void)?
-    /// FIFO queue of requested day-starts — one per in-flight HR log request.
-    /// Responses arrive in the same order as requests, so we dequeue from the front.
-    private var heartRateLogRequestedDays: [Date] = []
+    /// Maps UTC-midnight target (sent to ring) → local day-start (for persistence/UI).
+    /// Keyed lookup avoids FIFO ordering fragility when NoData responses shift the queue.
+    private var heartRateLogUTCToLocalDay: [Date: Date] = [:]
     /// Called with each raw sleep response packet (16 bytes) for debugging / future parsing
     var sleepPacketCallback: (([UInt8]) -> Void)?
     /// Called when sleep data (command 68) is received; dayOffset is the requested day (0 = today).
@@ -2434,12 +2434,13 @@ extension RingSessionManager {
             let data = Data(packet)
             peripheral.writeValue(data, for: uartRxCharacteristic, type: .withResponse)
 
-            // Enqueue the LOCAL-timezone day-start for persistence/UI (user sees local calendar days).
+            // Map the UTC target to the correct LOCAL day for persistence/UI.
+            // dayOffset=0 → today local, dayOffset=1 → yesterday local, etc.
             let localDayStart = Calendar.current.startOfDay(
                 for: Calendar.current.date(byAdding: .day, value: -dayOffset, to: Date.now) ?? Date.now
             )
-            self.heartRateLogRequestedDays.append(localDayStart)
-            tLog("HRL Command Sent (dayOffset: \(dayOffset), utcTarget: \(target), localDay: \(localDayStart), queue=\(heartRateLogRequestedDays.count))")
+            self.heartRateLogUTCToLocalDay[target] = localDayStart
+            tLog("HRL Command Sent (dayOffset: \(dayOffset), utcTarget: \(target), localDay: \(localDayStart), map=\(heartRateLogUTCToLocalDay.count))")
 
             // Store completion handler to call when data is received
             self.heartRateLogCallback = completion
@@ -2461,32 +2462,34 @@ extension RingSessionManager {
         //   NoData    → ring has no data for this day (subType 0xFF) — dequeue & skip
         //   HeartRateLog → complete log assembled — dequeue & persist
         if parsed is NoData {
-            if !heartRateLogRequestedDays.isEmpty {
-                let skipped = heartRateLogRequestedDays.removeFirst()
-                tLog("[HRL] No data from ring — dequeued \(skipped), queueRemaining=\(heartRateLogRequestedDays.count)")
-            }
+            // NoData has no timestamp — we can't look up the map entry here,
+            // but that's fine since there's nothing to persist.
+            tLog("[HRL] No data from ring (subType=0xFF), map=\(heartRateLogUTCToLocalDay.count)")
             return
         }
 
         guard let log = parsed as? HeartRateLog else {
-            // Intermediate packet — still assembling, don't dequeue
+            // Intermediate packet — still assembling
             return
         }
 
-        // Derive local day directly from the ring's UTC timestamp.
-        // The FIFO approach is fragile — if NoData responses shift the queue or
-        // responses arrive out of order, FIFO dequeue assigns the wrong day.
-        // The ring embeds a UTC timestamp in each log; converting to local gives
-        // the correct calendar day reliably.
-        let requestedDay = Calendar.current.startOfDay(for: log.timestamp)
+        // Look up the local day from our UTC→local map using the ring's timestamp.
+        // The ring echoes back the UTC midnight we requested, so this is a direct key match.
+        // This avoids FIFO ordering issues — the map is keyed, not sequential.
+        var utcCal = Calendar(identifier: .gregorian)
+        utcCal.timeZone = TimeZone(identifier: "UTC")!
+        let ringUTCDay = utcCal.startOfDay(for: log.timestamp)
 
-        // Still drain the FIFO to keep it in sync (best-effort), but don't use
-        // its value for persistence.
-        let fifoDay: Date? = heartRateLogRequestedDays.isEmpty ? nil : heartRateLogRequestedDays.removeFirst()
-        if let fifoDay, fifoDay != requestedDay {
-            tLog("[HRL] FIFO mismatch: fifo=\(fifoDay) vs ringDerived=\(requestedDay) — using ringDerived")
+        let requestedDay: Date
+        if let mapped = heartRateLogUTCToLocalDay.removeValue(forKey: ringUTCDay) {
+            requestedDay = mapped
+            tLog("[HRL] Mapped UTC \(ringUTCDay) → local \(mapped)")
+        } else {
+            // Fallback: compute local day from dayOffset=0 assumption
+            requestedDay = Calendar.current.startOfDay(for: Date.now)
+            tLog("[HRL] WARNING: No map entry for UTC \(ringUTCDay) — falling back to today local \(requestedDay)")
         }
-        tLog("[HRL] Parsed log: ringTimestamp=\(log.timestamp) localDay=\(requestedDay) range=\(log.range)min nonZero=\(log.heartRates.filter { $0 > 0 }.count) queueRemaining=\(heartRateLogRequestedDays.count)")
+        tLog("[HRL] Parsed log: ringTimestamp=\(log.timestamp) localDay=\(requestedDay) range=\(log.range)min nonZero=\(log.heartRates.filter { $0 > 0 }.count) mapRemaining=\(heartRateLogUTCToLocalDay.count)")
         heartRateLogPersistenceCallback?(log, requestedDay)
         heartRateLogCallback?(log)
         heartRateLogCallback = nil
