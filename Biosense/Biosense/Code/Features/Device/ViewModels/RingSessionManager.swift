@@ -121,7 +121,7 @@ class RingSessionManager: NSObject {
     private var sportRTBeatSamples: [(time: Date, b10: UInt8)] = []
 
     /// How many seconds of history to use for the sliding-window HR estimate.
-    private let sportRTWindowSeconds: TimeInterval = 10.0
+    private let sportRTWindowSeconds: TimeInterval = RingConstants.sportRTWindowSeconds
     /// Latest real-time blood oxygen reading in percent.
     var realTimeBloodOxygenPercent: Int?
     /// Timer that sends continue keepalives to keep the SpO2 measurement alive.
@@ -173,20 +173,12 @@ class RingSessionManager: NSObject {
     private var manager: CBCentralManager!
     private var peripheral: CBPeripheral?
 
-    private static let scanTimeout: TimeInterval = 15
     private var scanWorkItem: DispatchWorkItem?
 
-    /// Interval between keepalive battery pings.  Each ping wakes the app from
-    /// background via the BLE response callback, forming a self-sustaining chain.
-    /// 60 s gives us ~1/min InfluxDB spot-checks even when the phone is locked.
-    private static let keepaliveInterval: TimeInterval = 60
     private var keepaliveWorkItem: DispatchWorkItem?
     /// Timestamp of the last keepalive ping sent (or chain restart). Used to detect stalled chains.
     private var lastKeepaliveSentAt: Date = Date()
 
-    /// How many keepalive pings between full data syncs (HR log, HRV, SpO2, etc.).
-    /// With a 60 s keepalive, 5 = full sync every ~5 minutes.
-    private static let fullSyncEveryNPings: Int = 5
     /// Counter incremented on each keepalive; triggers full sync when it hits fullSyncEveryNPings.
     /// Spot-check rotation: SpO2 every 10th ping (~10 min, 60s window), temperature every 3rd, rest HR.
     private var keepalivePingCount: Int = 0
@@ -228,12 +220,12 @@ class RingSessionManager: NSObject {
     /// Auto-reconnect task after unexpected disconnection.
     private var reconnectTask: Task<Void, Never>?
 
-    /// Throttle real-time InfluxDB writes — 15s during workouts, 60s otherwise.
+    /// Throttle real-time InfluxDB writes.
     private var lastInfluxHRWrite: Date = .distantPast
     private var lastInfluxSpO2Write: Date = .distantPast
     private var lastInfluxTempWrite: Date = .distantPast
     private var currentInfluxWriteInterval: TimeInterval {
-        isWorkoutActive ? 15 : 60
+        isWorkoutActive ? RingConstants.influxWriteIntervalWorkout : RingConstants.influxWriteIntervalNormal
     }
 
     private var uartRxCharacteristic: CBCharacteristic?
@@ -241,58 +233,17 @@ class RingSessionManager: NSObject {
     private var colmiWriteCharacteristic: CBCharacteristic?
     private var colmiNotifyCharacteristic: CBCharacteristic?
 
+    // BLE Service/Characteristic UUIDs — aliases for readability.
     private static let ringServiceUUID = SmartRingBLE.nordicUARTServiceUUID
     private static let colmiServiceUUID = SmartRingBLE.colmiServiceUUID
     private static let colmiWriteUUID = SmartRingBLE.colmiWriteUUID
     private static let colmiNotifyUUID = SmartRingBLE.colmiNotifyUUID
     private static let uartRxCharacteristicUUID = SmartRingBLE.nordicUARTTxUUID
     private static let uartTxCharacteristicUUID = SmartRingBLE.nordicUARTRxUUID
-
     private static let deviceInfoServiceUUID = SmartRingBLE.deviceInfoServiceUUID
-    private static let deviceHardwareUUID = SmartRingBLE.hardwareRevisionCharUUID
-    private static let deviceFirmwareUUID = SmartRingBLE.firmwareRevisionCharUUID
 
-    private static let CMD_SET_DEVICE_TIME: UInt8 = 0x01
-    private static let CMD_BLINK_TWICE: UInt8 = 16 // 0x10
-    private static let CMD_BATTERY: UInt8 = 3
-    private static let CMD_READ_HEART_RATE: UInt8 = 21  // 0x15
-    /// HR timing monitor switch: READ/WRITE enabled + interval in minutes. ID: 0x16.
-    private static let CMD_HR_TIMING_MONITOR: UInt8 = 0x16
-    /// Heart Rate setting (Settings protocol): READ/WRITE isEnabled. ID: 22.
-    private static let CMD_HEART_RATE_SETTING: UInt8 = 22
-    /// Pressure/Stress setting (Settings protocol): READ/WRITE isEnabled. ID: 54.
-    private static let CMD_PRESSURE: UInt8 = 54
-    /// Pressure/Stress historical data request (Commands protocol, split array).
-    private static let CMD_READ_PRESSURE_DATA: UInt8 = 55
-    /// HRV setting (Settings protocol): READ/WRITE isEnabled. ID: 56.
-    private static let CMD_HRV: UInt8 = 56
-    /// HRV historical data request (Commands protocol, split array).
-    private static let CMD_READ_HRV_DATA: UInt8 = 57
-    /// Sports/activity historical data request (steps, calories, distance).
-    private static let CMD_READ_ACTIVITY_DATA: UInt8 = 67
-    /// Sleep Data (Colmi BLE API: https://colmi.puxtril.com/commands/#sleep-data) – request/response use ID 68
-    private static let CMD_SLEEP_DATA: UInt8 = 68
-    /// Legacy Big Data syncHistoricalSleep; some firmware may use 0xBC 0x27
-    private static let CMD_SYNC_SLEEP_LEGACY: UInt8 = 188 // 0xBC
-
-    private static let CMD_START_REAL_TIME: UInt8 = 105
-    private static let CMD_STOP_REAL_TIME: UInt8 = 106
-    /// Sport real-time telemetry — ring sends these automatically during exercise.
-    private static let CMD_SPORT_REAL_TIME: UInt8 = 115  // 0x73
-    /// Realtime heart rate response (0x1E).  Sent by the ring when
-    /// DataType=6 (realtimeHeartRate) is requested via CMD_START_REAL_TIME.
-    /// Packet: [30, heartRate, 0, ..., checksum]
-    private static let CMD_REAL_TIME_HEART_RATE: UInt8 = 30
-    
-    
-    /// Pathway A: general-purpose real-time start/response (0x6A).
-    /// Used for SpO2 (DataType=3) and other non-HR measurements.
-    /// NOT the same as CMD_STOP_REAL_TIME (which is 0x6A but used for HR auto-stop).
-    private static let CMD_PATHWAY_A: UInt8 = 0x6A       // 106
-    /// Pathway A: stop command (0x6B).
-    private static let CMD_PATHWAY_A_STOP: UInt8 = 0x6B  // 107
-
-    private static let CMD_BLOOD_OXYGEN: UInt8 = 44
+    // Command IDs — see RingConstants for documentation.
+    private typealias CMD = RingConstants
     
 
     private let hrp = HeartRateLogParser()
@@ -356,9 +307,12 @@ class RingSessionManager: NSObject {
     private var lastSleepDayOffset: Int = 0
     /// Big Data notify buffer (variable-length responses may arrive in chunks).
     private var bigDataBuffer: [UInt8] = []
-    private static let bigDataMagic: UInt8 = 188
-    private static let bigDataSleepId: UInt8 = 39
-    private static let bigDataBloodOxygenId: UInt8 = 42
+
+    /// Cancellable command scheduler — replaces nested asyncAfter chains
+    /// in syncOnConnect, runPeriodicSync, and handleBatteryResponse.
+    private let syncScheduler = CommandScheduler()
+    private let periodicSyncScheduler = CommandScheduler()
+    private let fullSyncScheduler = CommandScheduler()
 
     // MARK: - Debug log (for Debug tab)
     struct DebugLogEntry: Identifiable {
@@ -368,7 +322,6 @@ class RingSessionManager: NSObject {
         let bytes: [UInt8]
         enum Direction: String { case sent = "→ Sent"; case received = "← Received" }
     }
-    private static let debugLogMaxEntries = 300
     var debugLog: [DebugLogEntry] = []
 
     override init() {
@@ -453,7 +406,7 @@ class RingSessionManager: NSObject {
             self?.stopDiscovery()
         }
         scanWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.scanTimeout, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.scanTimeout, execute: item)
     }
 
     /// Connect to a discovered peripheral and save it as the ring (persist identifier).
@@ -538,7 +491,7 @@ class RingSessionManager: NSObject {
             self?.stopScanningForRing()
         }
         scanWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.scanTimeout, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.scanTimeout, execute: item)
     }
 
     private func stopScanningForRing() {
@@ -596,8 +549,8 @@ class RingSessionManager: NSObject {
     func appendToDebugLog(direction: DebugLogEntry.Direction, bytes: [UInt8]) {
         let entry = DebugLogEntry(date: Date(), direction: direction, bytes: bytes)
         debugLog.append(entry)
-        if debugLog.count > Self.debugLogMaxEntries {
-            debugLog.removeFirst(debugLog.count - Self.debugLogMaxEntries)
+        if debugLog.count > RingConstants.debugLogMaxEntries {
+            debugLog.removeFirst(debugLog.count - RingConstants.debugLogMaxEntries)
         }
     }
 
@@ -888,22 +841,22 @@ extension RingSessionManager: CBPeripheralDelegate {
         }
         
         switch packet[0] {
-        case RingSessionManager.CMD_SET_DEVICE_TIME:
+        case CMD.cmdSetDeviceTime:
             // Response to time sync — byte[1]: 0=success, else error
             if packet.count >= 2 && packet[1] == 0 {
                 tLog("[SyncTime] Ring acknowledged time sync OK")
             } else {
                 tLog("[SyncTime] Ring time sync response: \(packet.prefix(4).map { String(format: "%02x", $0) }.joined(separator: " "))")
             }
-        case RingSessionManager.CMD_BATTERY:
+        case CMD.cmdBattery:
             handleBatteryResponse(packet: packet)
-        case RingSessionManager.CMD_READ_HEART_RATE:
+        case CMD.cmdReadHeartRate:
             handleHeartRateLogResponse(packet: packet)
-        case RingSessionManager.CMD_HR_TIMING_MONITOR:
+        case CMD.cmdHRTimingMonitor:
             handleHRTimingMonitorResponse(packet: packet)
         case Counter.shared.CMD_X:
             tLog("🔥")
-        case RingSessionManager.CMD_START_REAL_TIME:
+        case CMD.cmdStartRealTime:
             guard packet.count >= 4 else {
                 tLog("Real-time response packet too short: \(packet)")
                 break
@@ -936,7 +889,7 @@ extension RingSessionManager: CBPeripheralDelegate {
                     // 0xFF (255) is a known firmware artefact; valid resting-to-max
                     // range is roughly 30-220 BPM.  Values like 1-2 bpm are sensor
                     // noise during warmup — not real heart rates.
-                    guard readingValue >= 30 && readingValue <= 220 else {
+                    guard readingValue >= RingConstants.validBPMMin && readingValue <= RingConstants.validBPMMax else {
                         tLog("[RealTime] Ignoring out-of-range HR: \(readingValue)")
                         break
                     }
@@ -1011,7 +964,7 @@ extension RingSessionManager: CBPeripheralDelegate {
 
                     // For non-spot-check continuous streaming, only surface
                     // calibrated values (35-38°C) to the UI / InfluxDB.
-                    guard celsius >= 35.0 && celsius <= 38.0 else { break }
+                    guard celsius >= RingConstants.bodyTempRangeMin && celsius <= RingConstants.bodyTempRangeMax else { break }
                     realTimeTemperatureCelsius = celsius
 
                     // During a spot-check, do NOT stop early — let the full
@@ -1031,7 +984,7 @@ extension RingSessionManager: CBPeripheralDelegate {
             } else {
                 tLog("Error in reading - Type: \(readingType), Error Code: \(errorCode)")
             }
-        case RingSessionManager.CMD_REAL_TIME_HEART_RATE:
+        case CMD.cmdRealTimeHeartRate:
             // Response to DataType=6 (realtimeHeartRate) streaming.
             // Packet format: [30, heartRate, 0, ..., checksum]
             let hrValue = packet[1]
@@ -1041,7 +994,7 @@ extension RingSessionManager: CBPeripheralDelegate {
             if hrValue == 0 {
                 if isWorkoutActive { realTimeHeartRateBPM = nil }
                 tLog("[RT-HR30] heartRate=0 (warmup)")
-            } else if hrValue >= 30 && hrValue <= 220 {
+            } else if hrValue >= RingConstants.validBPMMin && hrValue <= RingConstants.validBPMMax {
                 realTimeHeartRateBPM = Int(hrValue)
                 tLog("[RT-HR30] heartRate=\(hrValue)")
                 if now.timeIntervalSince(lastInfluxHRWrite) >= currentInfluxWriteInterval {
@@ -1053,7 +1006,7 @@ extension RingSessionManager: CBPeripheralDelegate {
             } else {
                 tLog("[RT-HR30] Ignoring out-of-range HR: \(hrValue)")
             }
-        case RingSessionManager.CMD_STOP_REAL_TIME:
+        case CMD.cmdStopRealTime:
             // 0x6A serves double duty:
             //   (a) HR auto-stop notification (Pathway B)
             //   (b) Pathway A data response (SpO2 etc.) — packet[1]=DataType, packet[2]=error, packet[3]=value
@@ -1075,24 +1028,24 @@ extension RingSessionManager: CBPeripheralDelegate {
                     realTimeHeartRateBPM = nil
                 }
             }
-        case RingSessionManager.CMD_PATHWAY_A_STOP:  // 0x6B
+        case CMD.cmdPathwayAStop:  // 0x6B
             tLog("[SpO2] Stop notification (0x6B) — pkt=\(packet.prefix(4).map { String(format: "%02x", $0) }.joined(separator: " "))")
-        case RingSessionManager.CMD_SLEEP_DATA:
+        case CMD.cmdSleepData:
             handleSleepDataResponse(packet: packet)
-        case RingSessionManager.CMD_SYNC_SLEEP_LEGACY:
+        case CMD.cmdSyncSleepLegacy:
             handleSleepResponse(packet: packet)
-        case RingSessionManager.CMD_READ_HRV_DATA:
+        case CMD.cmdReadHRVData:
             handleHRVDataResponse(packet: packet)
-        case RingSessionManager.CMD_READ_PRESSURE_DATA:
+        case CMD.cmdReadPressureData:
             handlePressureDataResponse(packet: packet)
-        case RingSessionManager.CMD_READ_ACTIVITY_DATA:
+        case CMD.cmdReadActivityData:
             handleActivityDataResponse(packet: packet)
-        case RingSessionManager.CMD_HRV,
-             RingSessionManager.CMD_HEART_RATE_SETTING,
-             RingSessionManager.CMD_BLOOD_OXYGEN,
-             RingSessionManager.CMD_PRESSURE:
+        case CMD.cmdHRVSetting,
+             CMD.cmdHeartRateSetting,
+             CMD.cmdBloodOxygen,
+             CMD.cmdPressureSetting:
             handleTrackingSettingResponse(packet: packet)
-        case RingSessionManager.CMD_SPORT_REAL_TIME:
+        case CMD.cmdSportRealTime:
             handleSportRealTimeResponse(packet: packet)
         case 158: // 0x9E — ack from CMD_REAL_TIME_HEART_RATE (30) continue keepalive (30+128)
             break
@@ -1123,7 +1076,7 @@ extension RingSessionManager: CBPeripheralDelegate {
 extension RingSessionManager {
     func sendBlinkTwiceCommand() {
         do {
-            let blinkTwicePacket = try makePacket(command: RingSessionManager.CMD_BLINK_TWICE, subData: nil)
+            let blinkTwicePacket = try makePacket(command: CMD.cmdBlinkTwice, subData: nil)
             appendToDebugLog(direction: .sent, bytes: blinkTwicePacket)
             sendPacket(packet: blinkTwicePacket)
         } catch {
@@ -1138,7 +1091,7 @@ extension RingSessionManager {
 extension RingSessionManager {
     static func makeBigDataRequestPacket(dataId: UInt8) -> [UInt8] {
         [
-            Self.bigDataMagic,
+            CMD.bigDataMagic,
             dataId,
             0, 0,       // dataLen = 0 (LE)
             0xFF, 0xFF  // crc16 = 0xFFFF (LE)
@@ -1147,7 +1100,7 @@ extension RingSessionManager {
 
     static func parseBigDataResponsePacket(_ packet: [UInt8]) -> (dataId: UInt8, dataLen: Int, crc16: UInt16, payload: [UInt8])? {
         let headerLen = 6
-        guard packet.count >= headerLen, packet[0] == Self.bigDataMagic else { return nil }
+        guard packet.count >= headerLen, packet[0] == CMD.bigDataMagic else { return nil }
         let dataId = packet[1]
         let dataLen = Int(packet[2]) | (Int(packet[3]) << 8)
         let crc16 = UInt16(packet[4]) | (UInt16(packet[5]) << 8)
@@ -1173,7 +1126,7 @@ extension RingSessionManager {
         bigDataBuffer.append(contentsOf: chunk)
         let headerLen = 6
         while bigDataBuffer.count >= 6 {
-            guard bigDataBuffer[0] == Self.bigDataMagic else {
+            guard bigDataBuffer[0] == CMD.bigDataMagic else {
                 bigDataBuffer.removeFirst()
                 continue
             }
@@ -1192,7 +1145,7 @@ extension RingSessionManager {
 
     private func handleBigDataResponse(dataId: UInt8, payload: [UInt8]) {
         switch dataId {
-        case Self.bigDataSleepId:
+        case CMD.bigDataSleepId:
             if let sleepData = BigDataSleepParser.parseSleepPayload(payload) {
                 tLog("Big Data sleep received – \(sleepData.sleepDays) day(s)")
                 bigDataSleepCallback?(sleepData)
@@ -1200,7 +1153,7 @@ extension RingSessionManager {
             } else {
                 tLog("Big Data sleep parse failed – payload length: \(payload.count)")
             }
-        case Self.bigDataBloodOxygenId:
+        case CMD.bigDataBloodOxygenId:
             tLog("Big Data blood oxygen received – payload length: \(payload.count)")
             bigDataBloodOxygenPayloadCallback?(payload)
             bigDataBloodOxygenPayloadPersistenceCallback?(payload)
@@ -1234,7 +1187,7 @@ extension RingSessionManager {
     }
 
     private func scheduleNextKeepalive(delay: TimeInterval? = nil) {
-        let delay = delay ?? Self.keepaliveInterval
+        let delay = delay ?? RingConstants.keepaliveInterval
         keepaliveWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             self?.sendKeepalive()
@@ -1261,7 +1214,7 @@ extension RingSessionManager {
         lastKeepaliveSentAt = Date()
         awaitingKeepaliveBatteryResponse = true
         do {
-            let packet = try makePacket(command: Self.CMD_BATTERY)
+            let packet = try makePacket(command: CMD.cmdBattery)
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
         } catch {
@@ -1320,58 +1273,36 @@ extension RingSessionManager {
         sendRealTimeStop(type: .temperature)
 
         getBatteryStatus { _ in }
-        // Safety net: if battery response is lost in the post-restore data flood,
-        // retry once after 5s so the UI doesn't stay stuck on "--% Connect ring".
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+
+        // Build the sync sequence with staggered delays.
+        // The ring serialises BLE responses, so commands must be spaced ~0.6s apart.
+        var steps: [CommandScheduler.Step] = []
+
+        // Battery retry safety net (in case response was lost in post-restore flood).
+        steps.append(.init(delay: 5.0) { [weak self] in
             guard let self, self.currentBatteryInfo == nil else { return }
             tLog("[SyncOnConnect] Battery still nil after 5s — retrying")
             self.getBatteryStatus { _ in }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            guard let self else { return }
-            // Skip if a workout started while we were waiting — BLE sync
-            // commands flood the channel and disrupt the real-time HR stream.
-            guard !self.isWorkoutActive else {
-                tLog("[SyncOnConnect] Workout active — skipping sleep sync")
-                return
-            }
-            self.syncSleep(dayOffset: 0)
-        }
-        // Fetch a full week of HR logs (days 0–6) so the week view is populated.
-        // Each request is enqueued; BLE responses are serialised by the ring.
+        })
+        // Sleep (Big Data).
+        steps.append(.init(delay: 0.6) { [weak self] in self?.syncSleep(dayOffset: 0) })
+        // HR logs for a full week (days 0–6), spaced 0.6s apart.
         for day in 0...6 {
-            let delay = 1.2 + Double(day) * 0.6
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self, !self.isWorkoutActive else {
-                    if day == 0 { tLog("[SyncOnConnect] Workout active — skipping HR log sync") }
-                    return
-                }
-                self.getHeartRateLog(dayOffset: day) { _ in }
-            }
+            steps.append(.init(delay: 1.2 + Double(day) * 0.6) { [weak self] in
+                self?.getHeartRateLog(dayOffset: day) { _ in }
+            })
         }
-        // Other metrics start after HR logs (7 × 0.6 = 4.2s offset from 1.2 base = 5.4s)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.4) { [weak self] in
-            guard let self, !self.isWorkoutActive else { return }
-            self.syncHRVData(dayOffset: 0)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
-            guard let self, !self.isWorkoutActive else { return }
-            self.syncBloodOxygen(dayOffset: 0)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6.6) { [weak self] in
-            guard let self, !self.isWorkoutActive else { return }
-            self.syncPressureData(dayOffset: 0)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 7.2) { [weak self] in
-            guard let self, !self.isWorkoutActive else { return }
-            self.syncActivityData(dayOffset: 0)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 7.8) { [weak self] in
+        // Other metrics start after HR logs (7 × 0.6 = 4.2s offset from 1.2 base = 5.4s).
+        steps.append(.init(delay: 5.4) { [weak self] in self?.syncHRVData(dayOffset: 0) })
+        steps.append(.init(delay: 6.0) { [weak self] in self?.syncBloodOxygen(dayOffset: 0) })
+        steps.append(.init(delay: 6.6) { [weak self] in self?.syncPressureData(dayOffset: 0) })
+        steps.append(.init(delay: 7.2) { [weak self] in self?.syncActivityData(dayOffset: 0) })
+        steps.append(.init(delay: 7.8) { [weak self] in
             guard let self else { return }
-            Task { @MainActor in
-                await self.ensureHRLogSettings()
-            }
-        }
+            Task { @MainActor in await self.ensureHRLogSettings() }
+        })
+
+        syncScheduler.run(steps, cancelIf: { [weak self] in self?.isWorkoutActive ?? false })
     }
 
     /// Read HR log settings from ring; if disabled or interval doesn't match the user's saved
@@ -1477,31 +1408,20 @@ extension RingSessionManager {
             startSpotCheck()
         }
 
-        getHeartRateLog(dayOffset: 0) { _ in }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            self?.getHeartRateLog(dayOffset: 1) { _ in }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            self?.syncHRVData(dayOffset: 0)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
-            self?.syncBloodOxygen(dayOffset: 0)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
-            self?.syncPressureData(dayOffset: 0)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            self?.syncActivityData(dayOffset: 0)
-        }
-
-        // Re-check HR log settings — the ring firmware resets them on its own
-        // midnight reboot, so we need to periodically re-apply.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                await self.ensureHRLogSettings()
-            }
-        }
+        periodicSyncScheduler.run([
+            .init(delay: 0.0) { [weak self] in self?.getHeartRateLog(dayOffset: 0) { _ in } },
+            .init(delay: 0.6) { [weak self] in self?.getHeartRateLog(dayOffset: 1) { _ in } },
+            .init(delay: 1.2) { [weak self] in self?.syncHRVData(dayOffset: 0) },
+            .init(delay: 1.8) { [weak self] in self?.syncBloodOxygen(dayOffset: 0) },
+            .init(delay: 2.4) { [weak self] in self?.syncPressureData(dayOffset: 0) },
+            .init(delay: 3.0) { [weak self] in self?.syncActivityData(dayOffset: 0) },
+            // Re-check HR log settings — the ring firmware resets them on its own
+            // midnight reboot, so we need to periodically re-apply.
+            .init(delay: 3.6) { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in await self.ensureHRLogSettings() }
+            },
+        ], cancelIf: { [weak self] in self?.isWorkoutActive ?? false })
     }
 }
 
@@ -1511,13 +1431,13 @@ extension RingSessionManager {
     /// Request sleep data via Colmi Big Data service (dataId 39). Preferred for rings that support it.
     func syncSleep(dayOffset: Int = 0) {
         lastSleepDayOffset = dayOffset
-        sendBigDataRequest(dataId: Self.bigDataSleepId)
+        sendBigDataRequest(dataId: CMD.bigDataSleepId)
     }
 
     /// Request sleep from Nordic UART Commands protocol (ID 68). Use if Big Data sleep is not supported.
     func syncSleepCommands(dayOffset: Int = 0) {
         do {
-            let packet = try makePacket(command: Self.CMD_SLEEP_DATA, subData: [
+            let packet = try makePacket(command: CMD.cmdSleepData, subData: [
                 UInt8(dayOffset & 0xFF),
                 15,
                 0,
@@ -1535,7 +1455,7 @@ extension RingSessionManager {
     /// Legacy: request sleep via Big Data style 0xBC 0x27 on Nordic UART (use for firmware that doesn’t support command 68).
     func syncSleepLegacy() {
         do {
-            let packet = try makePacket(command: Self.CMD_SYNC_SLEEP_LEGACY, subData: [0x27])
+            let packet = try makePacket(command: CMD.cmdSyncSleepLegacy, subData: [0x27])
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
             tLog("Sleep sync (legacy 0xBC 0x27) requested")
@@ -1546,7 +1466,7 @@ extension RingSessionManager {
 
     private func handleSleepDataResponse(packet: [UInt8]) {
         // SleepDataResponse: commandId=68, year, month, day, time, sleepQualities, unused[3], crc
-        guard packet.count >= 6, packet[0] == Self.CMD_SLEEP_DATA else { return }
+        guard packet.count >= 6, packet[0] == CMD.cmdSleepData else { return }
         let year = Int(packet[1])
         let month = Int(packet[2])
         let day = Int(packet[3])
@@ -1577,7 +1497,7 @@ extension RingSessionManager {
     /// Request HRV historical data (Commands protocol, ID 57). dayOffset uses index field.
     func syncHRVData(dayOffset: Int = 0) {
         do {
-            let packet = try makePacket(command: Self.CMD_READ_HRV_DATA, subData: [UInt8(dayOffset & 0xFF)])
+            let packet = try makePacket(command: CMD.cmdReadHRVData, subData: [UInt8(dayOffset & 0xFF)])
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
             tLog("HRV data requested (Commands 57, dayOffset/index: \(dayOffset))")
@@ -1589,7 +1509,7 @@ extension RingSessionManager {
     /// Request pressure/stress historical data (Commands protocol, ID 55). dayOffset uses index field.
     func syncPressureData(dayOffset: Int = 0) {
         do {
-            let packet = try makePacket(command: Self.CMD_READ_PRESSURE_DATA, subData: [UInt8(dayOffset & 0xFF)])
+            let packet = try makePacket(command: CMD.cmdReadPressureData, subData: [UInt8(dayOffset & 0xFF)])
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
             tLog("Pressure data requested (Commands 55, dayOffset/index: \(dayOffset))")
@@ -1628,7 +1548,7 @@ extension RingSessionManager {
         let second = comps.second ?? 0
 
         do {
-            let packet = try makePacket(command: Self.CMD_SET_DEVICE_TIME, subData: [
+            let packet = try makePacket(command: CMD.cmdSetDeviceTime, subData: [
                 Self.toBCD(year),
                 Self.toBCD(month),
                 Self.toBCD(day),
@@ -1663,7 +1583,7 @@ extension RingSessionManager {
 
     private func sendActivityRequest(dayOffset: Int) {
         do {
-            let packet = try makePacket(command: Self.CMD_READ_ACTIVITY_DATA, subData: [
+            let packet = try makePacket(command: CMD.cmdReadActivityData, subData: [
                 UInt8(dayOffset & 0xFF),
                 0x0F,
                 0x00,
@@ -1681,7 +1601,7 @@ extension RingSessionManager {
     /// Request blood oxygen historical data via Big Data (dataId 42).
     func syncBloodOxygen(dayOffset: Int = 0) {
         _ = dayOffset // dataId 42 request itself does not include dayOffset in request header.
-        sendBigDataRequest(dataId: Self.bigDataBloodOxygenId)
+        sendBigDataRequest(dataId: CMD.bigDataBloodOxygenId)
     }
 
     private func handleHRVDataResponse(packet: [UInt8]) {
@@ -1765,7 +1685,7 @@ extension RingSessionManager {
                 }
                 let derivedBPM = Int(round(Double(totalBeats) * 60.0 / elapsed))
                 // Sanity: only accept 30-220 BPM
-                if derivedBPM >= 30 && derivedBPM <= 220 {
+                if derivedBPM >= Int(RingConstants.validBPMMin) && derivedBPM <= Int(RingConstants.validBPMMax) {
                     sportRTDerivedHR = derivedBPM
                 } else {
                     sportRTDerivedHR = nil
@@ -1849,7 +1769,7 @@ extension RingSessionManager {
     func sendRealtimeHRContinue() {
         guard peripheralConnected, characteristicsDiscovered else { return }
         do {
-            let packet = try makePacket(command: Self.CMD_REAL_TIME_HEART_RATE, subData: [3])
+            let packet = try makePacket(command: CMD.cmdRealTimeHeartRate, subData: [3])
             appendToDebugLog(direction: .sent, bytes: packet)
             sendPacket(packet: packet)
             tLog("[RT-HR30] Sent continue keepalive")
@@ -1891,7 +1811,7 @@ extension RingSessionManager {
 
     func continueRealTimeStreaming(type: RealTimeReading) {
         tLog("[RealTime] CONTINUE \(type)")
-        sendRealTimeCommand(command: RingSessionManager.CMD_START_REAL_TIME, type: type, action: .continue)
+        sendRealTimeCommand(command: CMD.cmdStartRealTime, type: type, action: .continue)
     }
 
     /// Stop a real-time stream.  Called by GymSessionManager on workout end
@@ -1953,12 +1873,12 @@ extension RingSessionManager {
 
     /// Send a 0x69 start command (does NOT update sensorState).
     private func sendRealTimeStart(type: RealTimeReading) {
-        sendRealTimeCommand(command: RingSessionManager.CMD_START_REAL_TIME, type: type, action: .start)
+        sendRealTimeCommand(command: CMD.cmdStartRealTime, type: type, action: .start)
     }
 
     /// Send a 0x6A stop command (does NOT update sensorState).
     private func sendRealTimeStop(type: RealTimeReading) {
-        sendRealTimeCommand(command: RingSessionManager.CMD_STOP_REAL_TIME, type: type, action: nil)
+        sendRealTimeCommand(command: CMD.cmdStopRealTime, type: type, action: nil)
     }
 
     /// Send an SpO2 start via 0x69 (does NOT update sensorState).
@@ -1972,7 +1892,7 @@ extension RingSessionManager {
         tLog("[SpO2] STOP")
         guard let uartRxCharacteristic, let peripheral else { return }
         do {
-            let packet = try makePacket(command: Self.CMD_STOP_REAL_TIME, subData: [RealTimeReading.spo2.rawValue])
+            let packet = try makePacket(command: CMD.cmdStopRealTime, subData: [RealTimeReading.spo2.rawValue])
             let hex = packet.map { String(format: "%02x", $0) }.joined(separator: " ")
             tLog("[SpO2] Stop packet (0x6A): \(hex)")
             peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
@@ -1994,13 +1914,10 @@ extension RingSessionManager {
     private func startSpotCheckTimeout(type: RealTimeReading) {
         let timeoutSeconds: UInt64
         switch type {
-        case .spo2:         timeoutSeconds = 60
-        case .temperature:  timeoutSeconds = 20
-        case .realtimeHeartRate, .heartRate:
-            // The VC30F PPG needs 45-60s to settle from warmup.
-            // With median-based collection, longer = more accurate.
-            timeoutSeconds = 60
-        default:            timeoutSeconds = 30
+        case .spo2:                        timeoutSeconds = RingConstants.spotCheckTimeoutSpO2
+        case .temperature:                 timeoutSeconds = RingConstants.spotCheckTimeoutTemp
+        case .realtimeHeartRate, .heartRate: timeoutSeconds = RingConstants.spotCheckTimeoutHR
+        default:                           timeoutSeconds = RingConstants.spotCheckTimeoutDefault
         }
         spotCheckTimeoutTask?.cancel()
         spotCheckTimeoutTask = Task { @MainActor [weak self] in
@@ -2018,8 +1935,8 @@ extension RingSessionManager {
             if type == .temperature {
                 let allReadings = self.spotCheckTempReadings
                 self.spotCheckTempReadings.removeAll()
-                let tail = Array(allReadings.suffix(5))
-                let inRange = tail.filter { $0 >= 35.0 && $0 <= 38.0 }
+                let tail = Array(allReadings.suffix(RingConstants.spotCheckMedianWindowSize))
+                let inRange = tail.filter { $0 >= RingConstants.bodyTempRangeMin && $0 <= RingConstants.bodyTempRangeMax }
 
                 if inRange.isEmpty {
                     let lastStr = allReadings.last.map { String(format: "%.1f", $0) } ?? "none"
@@ -2048,7 +1965,7 @@ extension RingSessionManager {
                 if allReadings.isEmpty {
                     tLog("[SpotCheck] HR timeout — no valid readings in \(timeoutSeconds)s")
                 } else {
-                    let tail = Array(allReadings.suffix(5))
+                    let tail = Array(allReadings.suffix(RingConstants.spotCheckMedianWindowSize))
                     let sorted = tail.sorted()
                     let median = sorted[sorted.count / 2]
                     tLog("[SpotCheck] HR timeout — median \(median) bpm from last \(tail.count)/\(allReadings.count) readings (tail range \(sorted.first!)–\(sorted.last!)), all samples: \(allReadings)")
@@ -2103,7 +2020,7 @@ extension RingSessionManager {
             return
         }
         do {
-            let packet = try makePacket(command: Self.CMD_START_REAL_TIME, subData: payload)
+            let packet = try makePacket(command: CMD.cmdStartRealTime, subData: payload)
             let hex = packet.map { String(format: "%02x", $0) }.joined(separator: " ")
             tLog("[SpO2] Sending: \(hex)")
             peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
@@ -2123,7 +2040,7 @@ extension RingSessionManager {
         }
         
         do {
-            let packet = try makePacket(command: RingSessionManager.CMD_BATTERY)
+            let packet = try makePacket(command: CMD.cmdBattery)
             let data = Data(packet)
             peripheral.writeValue(data, for: uartRxCharacteristic, type: .withResponse)
             
@@ -2135,7 +2052,7 @@ extension RingSessionManager {
     }
     
     private func handleBatteryResponse(packet: [UInt8]) {
-        guard packet[0] == RingSessionManager.CMD_BATTERY else {
+        guard packet[0] == CMD.cmdBattery else {
             tLog("Invalid battery packet received.")
             return
         }
@@ -2160,7 +2077,7 @@ extension RingSessionManager {
         // iOS suspending the app and killing the DispatchQueue timer.
         if !awaitingKeepaliveBatteryResponse {
             let stalledSeconds = Date().timeIntervalSince(lastKeepaliveSentAt)
-            if stalledSeconds > Self.keepaliveInterval * 2 && !spotCheckActive {
+            if stalledSeconds > RingConstants.keepaliveInterval * RingConstants.keepaliveStallMultiplier && !spotCheckActive {
                 tLog("[Keepalive] Chain stalled for \(Int(stalledSeconds))s — restarting from unsolicited battery response")
                 lastKeepaliveSentAt = Date() // prevent re-trigger on next battery packet
                 // Fall through to drive the chain as if this were a keepalive response.
@@ -2177,9 +2094,9 @@ extension RingSessionManager {
         // 3rd non-SpO2 ping; everything else is HR.
         if sensorState == .idle {
             let type: RealTimeReading
-            if keepalivePingCount % 10 == 0 && keepalivePingCount > 0 {
+            if keepalivePingCount % RingConstants.spotCheckSpO2EveryNPings == 0 && keepalivePingCount > 0 {
                 type = .spo2
-            } else if keepalivePingCount % 3 == 0 && keepalivePingCount > 0 {
+            } else if keepalivePingCount % RingConstants.spotCheckTempEveryNPings == 0 && keepalivePingCount > 0 {
                 type = .temperature
             } else {
                 type = .realtimeHeartRate
@@ -2192,39 +2109,27 @@ extension RingSessionManager {
         }
 
         // Full data sync (HR log, HRV, SpO2, etc.) every N pings.
-        if keepalivePingCount >= Self.fullSyncEveryNPings {
+        if keepalivePingCount >= RingConstants.fullSyncEveryNPings {
             keepalivePingCount = 0
             fullSyncCycleCount += 1
             if sensorState == .idle || spotCheckActive {
-                tLog("[Keepalive] Full sync triggered (every \(Self.fullSyncEveryNPings) pings)")
+                tLog("[Keepalive] Full sync triggered (every \(RingConstants.fullSyncEveryNPings) pings)")
                 // Stagger syncs so commands don't pile up on the ring.
                 // Start after 20 s — gives the spot-check time to finish first.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
-                    self?.getHeartRateLog(dayOffset: 0) { _ in }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 22) { [weak self] in
-                    self?.getHeartRateLog(dayOffset: 1) { _ in }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 24) { [weak self] in
-                    self?.syncHRVData(dayOffset: 0)
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 26) { [weak self] in
-                    self?.syncBloodOxygen(dayOffset: 0)
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 28) { [weak self] in
-                    self?.syncPressureData(dayOffset: 0)
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
-                    self?.syncActivityData(dayOffset: 0)
-                }
-                // Re-check HR log settings — the ring firmware resets them
-                // on its own midnight reboot cycle.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 32) { [weak self] in
-                    guard let self else { return }
-                    Task { @MainActor in
-                        await self.ensureHRLogSettings()
-                    }
-                }
+                fullSyncScheduler.run([
+                    .init(delay: 20) { [weak self] in self?.getHeartRateLog(dayOffset: 0) { _ in } },
+                    .init(delay: 22) { [weak self] in self?.getHeartRateLog(dayOffset: 1) { _ in } },
+                    .init(delay: 24) { [weak self] in self?.syncHRVData(dayOffset: 0) },
+                    .init(delay: 26) { [weak self] in self?.syncBloodOxygen(dayOffset: 0) },
+                    .init(delay: 28) { [weak self] in self?.syncPressureData(dayOffset: 0) },
+                    .init(delay: 30) { [weak self] in self?.syncActivityData(dayOffset: 0) },
+                    // Re-check HR log settings — the ring firmware resets them
+                    // on its own midnight reboot cycle.
+                    .init(delay: 32) { [weak self] in
+                        guard let self else { return }
+                        Task { @MainActor in await self.ensureHRLogSettings() }
+                    },
+                ], cancelIf: { [weak self] in self?.isWorkoutActive ?? false })
             }
         }
     }
@@ -2232,8 +2137,7 @@ extension RingSessionManager {
 
 // MARK: - Tracking settings (Settings protocol: HRV, Heart Rate, Blood Oxygen, Pressure)
 
-private let settingsActionRead: UInt8 = 1
-private let settingsActionWrite: UInt8 = 2
+// Settings protocol actions are in RingConstants.CMD.settingsActionRead / .CMD.settingsActionWrite
 
 enum RingSessionTrackingError: Error {
     case notConnected
@@ -2317,7 +2221,7 @@ extension RingSessionManager {
         }
         do {
             let data = [UInt8](repeating: 0, count: 13)
-            let packet = try makeSettingsPacket(commandId: commandId, action: settingsActionRead, data: data)
+            let packet = try makeSettingsPacket(commandId: commandId, action: CMD.settingsActionRead, data: data)
             appendToDebugLog(direction: .sent, bytes: packet)
             peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
         } catch {
@@ -2333,7 +2237,7 @@ extension RingSessionManager {
         do {
             var data = [UInt8](repeating: 0, count: 13)
             data[0] = isEnabled ? 1 : 0
-            let packet = try makeSettingsPacket(commandId: commandId, action: settingsActionWrite, data: data)
+            let packet = try makeSettingsPacket(commandId: commandId, action: CMD.settingsActionWrite, data: data)
             appendToDebugLog(direction: .sent, bytes: packet)
             peripheral.writeValue(Data(packet), for: uartRxCharacteristic, type: .withResponse)
         } catch {
@@ -2355,7 +2259,7 @@ extension RingSessionManager {
             pendingHRLogSettingsContinuation = continuation
             do {
                 // Read: send command 0x16 with all-zero subdata
-                let packet = try makePacket(command: Self.CMD_HR_TIMING_MONITOR)
+                let packet = try makePacket(command: CMD.cmdHRTimingMonitor)
                 appendToDebugLog(direction: .sent, bytes: packet)
                 sendPacket(packet: packet)
             } catch {
@@ -2378,7 +2282,7 @@ extension RingSessionManager {
                     UInt8(clamping: intervalMinutes)
                 ]
                 // Pad to fit standard packet (14 bytes subdata max, we only need 2)
-                let packet = try makePacket(command: Self.CMD_HR_TIMING_MONITOR, subData: subData)
+                let packet = try makePacket(command: CMD.cmdHRTimingMonitor, subData: subData)
                 appendToDebugLog(direction: .sent, bytes: packet)
                 sendPacket(packet: packet)
                 // Update local state immediately (ring doesn't always echo back on write)
@@ -2393,7 +2297,7 @@ extension RingSessionManager {
     }
 
     private func handleHRTimingMonitorResponse(packet: [UInt8]) {
-        guard packet.count >= 3, packet[0] == Self.CMD_HR_TIMING_MONITOR else {
+        guard packet.count >= 3, packet[0] == CMD.cmdHRTimingMonitor else {
             tLog("[HRLogSettings] Invalid HR timing monitor packet: \(packet)")
             return
         }
@@ -2452,7 +2356,7 @@ extension RingSessionManager {
     }
 
     private func handleHeartRateLogResponse(packet: [UInt8]) {
-        guard packet[0] == RingSessionManager.CMD_READ_HEART_RATE else {
+        guard packet[0] == CMD.cmdReadHeartRate else {
             tLog("Invalid heart rate log packet received.")
             return
         }
