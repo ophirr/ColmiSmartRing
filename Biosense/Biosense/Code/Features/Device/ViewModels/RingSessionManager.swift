@@ -709,6 +709,28 @@ extension RingSessionManager: CBCentralManagerDelegate {
         awaitingKeepaliveBatteryResponse = false
         stopKeepalive()
         stopPeriodicSync()
+        syncScheduler.cancel()
+        periodicSyncScheduler.cancel()
+        fullSyncScheduler.cancel()
+
+        // Resume any pending tracking-setting continuation so the caller
+        // doesn't hang forever.  The generation counter ensures a stale
+        // timeout DispatchWorkItem won't double-resume later.
+        if let continuation = pendingTrackingSettingContinuation {
+            tLog("[Disconnect] Resuming leaked tracking-setting continuation")
+            pendingTrackingSettingContinuation = nil
+            pendingTrackingSetting = nil
+            trackingSettingGeneration &+= 1
+            continuation.resume(throwing: RingSessionTrackingError.notConnected)
+        }
+        pendingTrackingSettingCallback = nil
+
+        // Same for HR log settings continuation.
+        if let continuation = pendingHRLogSettingsContinuation {
+            tLog("[Disconnect] Resuming leaked HR-log-settings continuation")
+            pendingHRLogSettingsContinuation = nil
+            continuation.resume(throwing: RingSessionTrackingError.notConnected)
+        }
 
         // Auto-reconnect: immediately issue a persistent connect request.
         // CoreBluetooth queues this and will complete it automatically when
