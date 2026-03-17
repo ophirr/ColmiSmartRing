@@ -61,10 +61,13 @@ private func dayRange(for date: Date, timeRange: TimeRange) -> ClosedRange<Date>
 
 // MARK: - Activity (Steps, Distance, Calories)
 
-struct ActivityStepsChartView: View {
+/// Unified bar chart for activity metrics (steps, distance, sleep hours, etc.) —
+/// replaces ActivityStepsChartView and ActivityDistanceChartView.
+struct ActivityBarChartView: View {
     let data: [TimeSeriesPoint]
-    var title: String = "Steps"
+    var title: String = "Activity"
     var color: Color = .cyan
+    var yLabel: String = "Value"
     var timeRange: TimeRange = .day
     var xDomain: ClosedRange<Date>? = nil
 
@@ -77,51 +80,14 @@ struct ActivityStepsChartView: View {
                 if timeRange == .day {
                     BarMark(
                         x: .value("Time", point.time),
-                        y: .value("Value", point.value)
+                        y: .value(yLabel, point.value)
                     )
                     .foregroundStyle(color.gradient)
                 } else {
                     BarMark(
                         xStart: .value("Start", dayRange(for: point.time, timeRange: timeRange).lowerBound),
                         xEnd: .value("End", dayRange(for: point.time, timeRange: timeRange).upperBound),
-                        y: .value("Value", point.value)
-                    )
-                    .foregroundStyle(color.gradient)
-                }
-            }
-            .timeRangeXAxis(timeRange, domain: xDomain)
-            .chartYAxis { AxisMarks(position: .leading) }
-            .clipped()
-            .frame(height: 180)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-struct ActivityDistanceChartView: View {
-    let data: [TimeSeriesPoint]
-    var title: String = "Distance"
-    var color: Color = .green
-    var timeRange: TimeRange = .day
-    var xDomain: ClosedRange<Date>? = nil
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
-            Chart(data) { point in
-                if timeRange == .day {
-                    BarMark(
-                        x: .value("Time", point.time),
-                        y: .value("Km", point.value)
-                    )
-                    .foregroundStyle(color.gradient)
-                } else {
-                    BarMark(
-                        xStart: .value("Start", dayRange(for: point.time, timeRange: timeRange).lowerBound),
-                        xEnd: .value("End", dayRange(for: point.time, timeRange: timeRange).upperBound),
-                        y: .value("Km", point.value)
+                        y: .value(yLabel, point.value)
                     )
                     .foregroundStyle(color.gradient)
                 }
@@ -180,10 +146,14 @@ func cumulativeSeries(from data: [TimeSeriesPoint]) -> [TimeSeriesPoint] {
     }
 }
 
-struct ActivityStepsCumulativeChartView: View {
+/// Unified cumulative line+area chart — replaces the former per-metric variants
+/// (ActivityStepsCumulativeChartView, ActivityDistanceCumulativeChartView,
+/// ActivityCaloriesCumulativeChartView).
+struct ActivityCumulativeChartView: View {
     let data: [TimeSeriesPoint]
-    var title: String = "Steps (cumulative)"
+    var title: String = "Cumulative"
     var color: Color = .cyan
+    var yLabel: String = "Value"
 
     private var cumulative: [TimeSeriesPoint] { cumulativeSeries(from: data) }
 
@@ -195,19 +165,19 @@ struct ActivityStepsCumulativeChartView: View {
             Chart(cumulative) { point in
                 LineMark(
                     x: .value("Time", point.time),
-                    y: .value("Steps", point.value)
+                    y: .value(yLabel, point.value)
                 )
                 .interpolationMethod(.catmullRom)
                 .foregroundStyle(color.gradient)
                 AreaMark(
                     x: .value("Time", point.time),
-                    y: .value("Steps", point.value)
+                    y: .value(yLabel, point.value)
                 )
                 .interpolationMethod(.catmullRom)
                 .foregroundStyle(color.gradient.opacity(0.3))
             }
             .chartXAxis {
-                AxisMarks(values: .stride(by: .hour, count: 4)) { value in
+                AxisMarks(values: .stride(by: .hour, count: 4)) { _ in
                     AxisValueLabel(format: .dateTime.hour())
                 }
             }
@@ -219,83 +189,6 @@ struct ActivityStepsCumulativeChartView: View {
     }
 }
 
-struct ActivityDistanceCumulativeChartView: View {
-    let data: [TimeSeriesPoint]
-    var title: String = "Distance (cumulative)"
-    var color: Color = .green
-
-    private var cumulative: [TimeSeriesPoint] { cumulativeSeries(from: data) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
-            Chart(cumulative) { point in
-                LineMark(
-                    x: .value("Time", point.time),
-                    y: .value("Km", point.value)
-                )
-                .interpolationMethod(.catmullRom)
-                .foregroundStyle(color.gradient)
-                AreaMark(
-                    x: .value("Time", point.time),
-                    y: .value("Km", point.value)
-                )
-                .interpolationMethod(.catmullRom)
-                .foregroundStyle(color.gradient.opacity(0.3))
-            }
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .hour, count: 4)) { value in
-                    AxisValueLabel(format: .dateTime.hour())
-                }
-            }
-            .chartYAxis { AxisMarks(position: .leading) }
-            .frame(height: 180)
-            .allowsHitTesting(false)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-struct ActivityCaloriesCumulativeChartView: View {
-    let data: [TimeSeriesPoint]
-    var title: String = "Calories (cumulative)"
-    var color: Color = .red
-
-    private var cumulative: [TimeSeriesPoint] { cumulativeSeries(from: data) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
-            Chart(cumulative) { point in
-                LineMark(
-                    x: .value("Time", point.time),
-                    y: .value("Kcal", point.value)
-                )
-                .interpolationMethod(.catmullRom)
-                .foregroundStyle(color.gradient)
-                AreaMark(
-                    x: .value("Time", point.time),
-                    y: .value("Kcal", point.value)
-                )
-                .interpolationMethod(.catmullRom)
-                .foregroundStyle(color.gradient.opacity(0.3))
-            }
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .hour, count: 4)) { value in
-                    AxisValueLabel(format: .dateTime.hour())
-                }
-            }
-            .chartYAxis { AxisMarks(position: .leading) }
-            .frame(height: 180)
-            .allowsHitTesting(false)
-        }
-        .padding(.vertical, 4)
-    }
-}
 
 // MARK: - Activity cumulative with comparison (no fill: gray weekly avg / yesterday, then today in color)
 
@@ -307,12 +200,15 @@ private struct SeriesTimeSeriesPoint: Identifiable {
     let series: String
 }
 
-struct ActivityStepsCumulativeComparisonChartView: View {
+/// Unified cumulative comparison chart (today vs. reference line) — replaces the
+/// former per-metric variants (ActivitySteps/Distance/CaloriesCumulativeComparisonChartView).
+struct ActivityCumulativeComparisonChartView: View {
     let comparisonData: [TimeSeriesPoint]
     let data: [TimeSeriesPoint]
-    var title: String = "Steps (cumulative)"
+    var title: String = "Cumulative"
     var comparisonLabel: String = "Weekly average"
     var color: Color = .cyan
+    var yLabel: String = "Value"
 
     private var comparisonCumulative: [TimeSeriesPoint] { cumulativeSeries(from: comparisonData) }
     private var cumulative: [TimeSeriesPoint] { cumulativeSeries(from: data) }
@@ -330,7 +226,7 @@ struct ActivityStepsCumulativeComparisonChartView: View {
             Chart(chartData) { point in
                 LineMark(
                     x: .value("Time", point.time),
-                    y: .value("Steps", point.value),
+                    y: .value(yLabel, point.value),
                     series: .value("Series", point.series)
                 )
                 .interpolationMethod(.catmullRom)
@@ -342,99 +238,7 @@ struct ActivityStepsCumulativeComparisonChartView: View {
                 "today": color
             ])
             .chartXAxis {
-                AxisMarks(values: .stride(by: .hour, count: 4)) { value in
-                    AxisValueLabel(format: .dateTime.hour())
-                }
-            }
-            .chartYAxis { AxisMarks(position: .leading) }
-            .frame(height: 180)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-struct ActivityDistanceCumulativeComparisonChartView: View {
-    let comparisonData: [TimeSeriesPoint]
-    let data: [TimeSeriesPoint]
-    var title: String = "Distance (cumulative)"
-    var comparisonLabel: String = "Weekly average"
-    var color: Color = .green
-
-    private var comparisonCumulative: [TimeSeriesPoint] { cumulativeSeries(from: comparisonData) }
-    private var cumulative: [TimeSeriesPoint] { cumulativeSeries(from: data) }
-
-    private var chartData: [SeriesTimeSeriesPoint] {
-        comparisonCumulative.map { SeriesTimeSeriesPoint(time: $0.time, value: $0.value, series: "comparison") }
-        + cumulative.map { SeriesTimeSeriesPoint(time: $0.time, value: $0.value, series: "today") }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
-            Chart(chartData) { point in
-                LineMark(
-                    x: .value("Time", point.time),
-                    y: .value("Km", point.value),
-                    series: .value("Series", point.series)
-                )
-                .interpolationMethod(.catmullRom)
-                .foregroundStyle(by: .value("Series", point.series))
-                .lineStyle(StrokeStyle(lineWidth: point.series == "today" ? 2.5 : 1.5))
-            }
-            .chartForegroundStyleScale([
-                "comparison": Color.gray,
-                "today": color
-            ])
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .hour, count: 4)) { value in
-                    AxisValueLabel(format: .dateTime.hour())
-                }
-            }
-            .chartYAxis { AxisMarks(position: .leading) }
-            .frame(height: 180)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-struct ActivityCaloriesCumulativeComparisonChartView: View {
-    let comparisonData: [TimeSeriesPoint]
-    let data: [TimeSeriesPoint]
-    var title: String = "Calories (cumulative)"
-    var comparisonLabel: String = "Weekly average"
-    var color: Color = .red
-
-    private var comparisonCumulative: [TimeSeriesPoint] { cumulativeSeries(from: comparisonData) }
-    private var cumulative: [TimeSeriesPoint] { cumulativeSeries(from: data) }
-
-    private var chartData: [SeriesTimeSeriesPoint] {
-        comparisonCumulative.map { SeriesTimeSeriesPoint(time: $0.time, value: $0.value, series: "comparison") }
-        + cumulative.map { SeriesTimeSeriesPoint(time: $0.time, value: $0.value, series: "today") }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
-            Chart(chartData) { point in
-                LineMark(
-                    x: .value("Time", point.time),
-                    y: .value("Kcal", point.value),
-                    series: .value("Series", point.series)
-                )
-                .interpolationMethod(.catmullRom)
-                .foregroundStyle(by: .value("Series", point.series))
-                .lineStyle(StrokeStyle(lineWidth: point.series == "today" ? 2.5 : 1.5))
-            }
-            .chartForegroundStyleScale([
-                "comparison": Color.gray,
-                "today": color
-            ])
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .hour, count: 4)) { value in
+                AxisMarks(values: .stride(by: .hour, count: 4)) { _ in
                     AxisValueLabel(format: .dateTime.hour())
                 }
             }
@@ -570,13 +374,13 @@ struct StressChartView: View {
 
 #Preview("Activity – Steps") {
     List {
-        ActivityStepsChartView(data: PreviewData.stepsPerHour)
+        ActivityBarChartView(data: PreviewData.stepsPerHour, title: "Steps")
     }
 }
 
 #Preview("Activity – Distance") {
     List {
-        ActivityDistanceChartView(data: PreviewData.distancePerHour)
+        ActivityBarChartView(data: PreviewData.distancePerHour, title: "Distance", color: .green, yLabel: "Km")
     }
 }
 
@@ -606,33 +410,36 @@ struct StressChartView: View {
 
 #Preview("All activity charts") {
     List {
-        ActivityStepsChartView(data: PreviewData.stepsPerHour)
-        ActivityDistanceChartView(data: PreviewData.distancePerHour)
+        ActivityBarChartView(data: PreviewData.stepsPerHour, title: "Steps")
+        ActivityBarChartView(data: PreviewData.distancePerHour, title: "Distance", color: .green, yLabel: "Km")
         ActivityCaloriesChartView(data: PreviewData.caloriesPerHour)
     }
 }
 
 #Preview("All activity cumulative") {
     List {
-        ActivityStepsCumulativeChartView(data: PreviewData.stepsPerHour)
-        ActivityDistanceCumulativeChartView(data: PreviewData.distancePerHour)
-        ActivityCaloriesCumulativeChartView(data: PreviewData.caloriesPerHour)
+        ActivityCumulativeChartView(data: PreviewData.stepsPerHour, title: "Steps (cumulative)", yLabel: "Steps")
+        ActivityCumulativeChartView(data: PreviewData.distancePerHour, title: "Distance (cumulative)", color: .green, yLabel: "Km")
+        ActivityCumulativeChartView(data: PreviewData.caloriesPerHour, title: "Calories (cumulative)", color: .red, yLabel: "Kcal")
     }
 }
 
 #Preview("All activity cumulative vs weekly avg") {
     List {
-        ActivityStepsCumulativeComparisonChartView(
+        ActivityCumulativeComparisonChartView(
             comparisonData: PreviewData.stepsPerHourWeeklyAverage,
-            data: PreviewData.stepsPerHour
+            data: PreviewData.stepsPerHour,
+            title: "Steps (cumulative)", yLabel: "Steps"
         )
-        ActivityDistanceCumulativeComparisonChartView(
+        ActivityCumulativeComparisonChartView(
             comparisonData: PreviewData.distancePerHourWeeklyAverage,
-            data: PreviewData.distancePerHour
+            data: PreviewData.distancePerHour,
+            title: "Distance (cumulative)", color: .green, yLabel: "Km"
         )
-        ActivityCaloriesCumulativeComparisonChartView(
+        ActivityCumulativeComparisonChartView(
             comparisonData: PreviewData.caloriesPerHourWeeklyAverage,
-            data: PreviewData.caloriesPerHour
+            data: PreviewData.caloriesPerHour,
+            title: "Calories (cumulative)", color: .red, yLabel: "Kcal"
         )
     }
 }

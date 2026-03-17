@@ -62,10 +62,7 @@ struct HomeSummaryCardsView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .biosenseCardStyle()
     }
 
     private var sleepCard: some View {
@@ -87,10 +84,7 @@ struct HomeSummaryCardsView: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .biosenseCardStyle()
     }
 
     private var heartRateCard: some View {
@@ -134,10 +128,7 @@ struct HomeSummaryCardsView: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .biosenseCardStyle()
         .onTapGesture { onHeartRateTap?() }
     }
 
@@ -161,10 +152,7 @@ struct HomeSummaryCardsView: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .biosenseCardStyle()
     }
 
     private var temperatureCard: some View {
@@ -187,10 +175,7 @@ struct HomeSummaryCardsView: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .biosenseCardStyle()
     }
 
     private func metricCell(value: String, unit: String, color: Color) -> some View {

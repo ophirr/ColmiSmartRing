@@ -35,23 +35,28 @@ struct ActivityScreenView: View {
                         .padding(.horizontal)
 
                     VStack(spacing: 20) {
-                        ActivityStepsCumulativeChartView(
+                        ActivityCumulativeChartView(
                             data: stepsData,
-                            title: L10n.Activity.stepsTitle
+                            title: L10n.Activity.stepsTitle,
+                            yLabel: "Steps"
                         )
                         .allowsHitTesting(false)
                         .contentShape(Rectangle())
 
-                        ActivityDistanceCumulativeChartView(
+                        ActivityCumulativeChartView(
                             data: distanceData,
-                            title: L10n.Activity.distanceTitle
+                            title: L10n.Activity.distanceTitle,
+                            color: .green,
+                            yLabel: "Km"
                         )
                         .allowsHitTesting(false)
                         .contentShape(Rectangle())
 
-                        ActivityCaloriesCumulativeChartView(
+                        ActivityCumulativeChartView(
                             data: caloriesData,
-                            title: L10n.Activity.caloriesTitle
+                            title: L10n.Activity.caloriesTitle,
+                            color: .red,
+                            yLabel: "Kcal"
                         )
                         .allowsHitTesting(false)
                         .contentShape(Rectangle())

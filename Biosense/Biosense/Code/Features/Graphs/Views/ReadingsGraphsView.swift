@@ -470,10 +470,11 @@ struct ReadingsGraphsView: View {
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
                         sleepSummaryRow
-                        ActivityStepsChartView(
+                        ActivityBarChartView(
                             data: rangeSleepDurationDaily,
                             title: "Sleep (hours)",
                             color: .indigo,
+                            yLabel: "Hours",
                             timeRange: selectedTimeRange,
                             xDomain: chartXDomain
                         )
@@ -646,20 +647,23 @@ struct ReadingsGraphsView: View {
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     } else {
-                        ActivityStepsChartView(data: activityStepsData)
-                        ActivityStepsCumulativeComparisonChartView(
+                        ActivityBarChartView(data: activityStepsData, title: "Steps")
+                        ActivityCumulativeComparisonChartView(
                             comparisonData: PreviewData.stepsPerHourWeeklyAverage,
-                            data: activityStepsData
+                            data: activityStepsData,
+                            title: "Steps (cumulative)", yLabel: "Steps"
                         )
-                        ActivityDistanceChartView(data: activityDistanceData)
-                        ActivityDistanceCumulativeComparisonChartView(
+                        ActivityBarChartView(data: activityDistanceData, title: "Distance", color: .green, yLabel: "Km")
+                        ActivityCumulativeComparisonChartView(
                             comparisonData: PreviewData.distancePerHourWeeklyAverage,
-                            data: activityDistanceData
+                            data: activityDistanceData,
+                            title: "Distance (cumulative)", color: .green, yLabel: "Km"
                         )
                         ActivityCaloriesChartView(data: activityCaloriesData)
-                        ActivityCaloriesCumulativeComparisonChartView(
+                        ActivityCumulativeComparisonChartView(
                             comparisonData: PreviewData.caloriesPerHourWeeklyAverage,
-                            data: activityCaloriesData
+                            data: activityCaloriesData,
+                            title: "Calories (cumulative)", color: .red, yLabel: "Kcal"
                         )
                     }
                 case .week, .month:
@@ -669,9 +673,9 @@ struct ReadingsGraphsView: View {
                             .foregroundStyle(.tertiary)
                     } else {
                         activitySummaryRow
-                        ActivityStepsChartView(data: rangeActivityStepsDaily, title: "Steps per day", timeRange: selectedTimeRange, xDomain: chartXDomain)
-                        ActivityDistanceChartView(data: rangeActivityDistanceDaily, title: "Distance per day", timeRange: selectedTimeRange, xDomain: chartXDomain)
-                        ActivityCaloriesChartView(data: rangeActivityCaloriesDaily, title: "Calories per day", timeRange: selectedTimeRange, xDomain: chartXDomain)
+                        ActivityBarChartView(data: rangeActivityStepsDaily, title: "Steps per day", timeRange: selectedTimeRange, xDomain: chartXDomain)
+                        ActivityBarChartView(data: rangeActivityDistanceDaily, title: "Distance per day", color: .green, yLabel: "Km", timeRange: selectedTimeRange, xDomain: chartXDomain)
+                        ActivityBarChartView(data: rangeActivityCaloriesDaily, title: "Calories per day", color: .red, yLabel: "Kcal", timeRange: selectedTimeRange, xDomain: chartXDomain)
                     }
                 }
             }
