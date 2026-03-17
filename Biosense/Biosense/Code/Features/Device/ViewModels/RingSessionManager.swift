@@ -427,7 +427,7 @@ class RingSessionManager: NSObject {
         if p.state == .connecting {
             tLog("[Connect] Stuck in .connecting — cancelling and retrying")
             manager.cancelPeripheralConnection(p)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.connectRetryDelay) { [weak self] in
                 self?.connectAndSaveRing(peripheral: p)
             }
             return
@@ -511,7 +511,7 @@ class RingSessionManager: NSObject {
         if peripheral.state == .connecting {
             tLog("[Connect] Peripheral stuck in .connecting — cancelling first")
             manager.cancelPeripheralConnection(peripheral)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.connectRetryDelay) { [weak self] in
                 guard let self, let p = self.peripheral, self.manager.state == .poweredOn else { return }
                 tLog("[Connect] Re-connecting after cancel")
                 self.manager.connect(p, options: [
@@ -936,7 +936,7 @@ extension RingSessionManager: CBPeripheralDelegate {
                     }
                 case .spo2:
                     tLog("[SpO2] Response on 0x69 — value=\(readingValue) error=\(errorCode) pkt=\(packet.prefix(6).map { String(format: "%02x", $0) }.joined(separator: " "))")
-                    guard readingValue >= 70, readingValue <= 100 else {
+                    guard readingValue >= RingConstants.spo2RangeMin, readingValue <= RingConstants.spo2RangeMax else {
                         tLog("[SpO2] Discarding out-of-range value: \(readingValue)%")
                         break
                     }
@@ -977,7 +977,7 @@ extension RingSessionManager: CBPeripheralDelegate {
                     guard packet.count >= 8 else { break }
                     let rawTemp = Int(packet[6]) | (Int(packet[7]) << 8)
                     guard rawTemp > 0 else { break }
-                    let celsius = Double(rawTemp) / 20.0
+                    let celsius = Double(rawTemp) / RingConstants.tempRawDivisor
                     tLog("[RealTime] Temp raw=\(rawTemp) → \(String(format: "%.1f", celsius))°C")
 
                     // Stash every reading so the timeout handler can pick
@@ -1069,7 +1069,7 @@ extension RingSessionManager: CBPeripheralDelegate {
             handleTrackingSettingResponse(packet: packet)
         case CMD.cmdSportRealTime:
             handleSportRealTimeResponse(packet: packet)
-        case 158: // 0x9E — ack from CMD_REAL_TIME_HEART_RATE (30) continue keepalive (30+128)
+        case CMD.cmdRealTimeHeartRateAck: // 0x9E — ack from CMD_REAL_TIME_HEART_RATE (30+128)
             break
         default:
             // Log unhandled opcodes so we can identify sleep/other response formats
@@ -1121,7 +1121,7 @@ extension RingSessionManager {
     }
 
     static func parseBigDataResponsePacket(_ packet: [UInt8]) -> (dataId: UInt8, dataLen: Int, crc16: UInt16, payload: [UInt8])? {
-        let headerLen = 6
+        let headerLen = CMD.bigDataHeaderLength
         guard packet.count >= headerLen, packet[0] == CMD.bigDataMagic else { return nil }
         let dataId = packet[1]
         let dataLen = Int(packet[2]) | (Int(packet[3]) << 8)
@@ -1146,8 +1146,8 @@ extension RingSessionManager {
 
     private func processBigDataChunk(_ chunk: [UInt8]) {
         bigDataBuffer.append(contentsOf: chunk)
-        let headerLen = 6
-        while bigDataBuffer.count >= 6 {
+        let headerLen = CMD.bigDataHeaderLength
+        while bigDataBuffer.count >= headerLen {
             guard bigDataBuffer[0] == CMD.bigDataMagic else {
                 bigDataBuffer.removeFirst()
                 continue
@@ -1245,14 +1245,14 @@ extension RingSessionManager {
         }
         // Don't schedule next here — handleBatteryResponse will do it when
         // the ring responds, keeping the chain BLE-event-driven.
-        // Safety net: if the ring doesn't respond within 30 s, retry.
+        // Safety net: if the ring doesn't respond within the fallback timeout, retry.
         let fallback = DispatchWorkItem { [weak self] in
             guard let self, self.keepaliveWorkItem == nil else { return }
-            tLog("[Keepalive] No battery response in 30s — retrying")
+            tLog("[Keepalive] No battery response in \(Int(RingConstants.keepaliveFallbackTimeout))s — retrying")
             self.sendKeepalive()
         }
         keepaliveWorkItem = fallback
-        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: fallback)
+        DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.keepaliveFallbackTimeout, execute: fallback)
     }
 }
 
@@ -1272,7 +1272,7 @@ extension RingSessionManager {
             tLog("[SyncOnConnect] Workout active on reconnect — restoring workout mode")
             sensorState = .workout
             getBatteryStatus { _ in }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.connectRetryDelay) { [weak self] in
                 guard let self, self.gymWorkoutInProgress else { return }
                 self.sendRealTimeStart(type: .realtimeHeartRate)
                 tLog("[SyncOnConnect] Workout HR stream restarted")
@@ -1297,29 +1297,31 @@ extension RingSessionManager {
         getBatteryStatus { _ in }
 
         // Build the sync sequence with staggered delays.
-        // The ring serialises BLE responses, so commands must be spaced ~0.6s apart.
+        // The ring serialises BLE responses, so commands must be spaced by bleCommandSpacing.
+        let spacing = RingConstants.bleCommandSpacing
         var steps: [CommandScheduler.Step] = []
 
         // Battery retry safety net (in case response was lost in post-restore flood).
-        steps.append(.init(delay: 5.0) { [weak self] in
+        steps.append(.init(delay: RingConstants.batteryRetryDelay) { [weak self] in
             guard let self, self.currentBatteryInfo == nil else { return }
-            tLog("[SyncOnConnect] Battery still nil after 5s — retrying")
+            tLog("[SyncOnConnect] Battery still nil after \(Int(RingConstants.batteryRetryDelay))s — retrying")
             self.getBatteryStatus { _ in }
         })
         // Sleep (Big Data).
-        steps.append(.init(delay: 0.6) { [weak self] in self?.syncSleep(dayOffset: 0) })
-        // HR logs for a full week (days 0–6), spaced 0.6s apart.
+        steps.append(.init(delay: spacing) { [weak self] in self?.syncSleep(dayOffset: 0) })
+        // HR logs for a full week (days 0–6), spaced by bleCommandSpacing.
         for day in 0...6 {
-            steps.append(.init(delay: 1.2 + Double(day) * 0.6) { [weak self] in
+            steps.append(.init(delay: spacing * 2 + Double(day) * spacing) { [weak self] in
                 self?.getHeartRateLog(dayOffset: day) { _ in }
             })
         }
-        // Other metrics start after HR logs (7 × 0.6 = 4.2s offset from 1.2 base = 5.4s).
-        steps.append(.init(delay: 5.4) { [weak self] in self?.syncHRVData(dayOffset: 0) })
-        steps.append(.init(delay: 6.0) { [weak self] in self?.syncBloodOxygen(dayOffset: 0) })
-        steps.append(.init(delay: 6.6) { [weak self] in self?.syncPressureData(dayOffset: 0) })
-        steps.append(.init(delay: 7.2) { [weak self] in self?.syncActivityData(dayOffset: 0) })
-        steps.append(.init(delay: 7.8) { [weak self] in
+        // Other metrics start after HR logs (7 × spacing offset from 2×spacing base).
+        let metricsBase = spacing * 2 + 7 * spacing  // = 9 × spacing = 5.4s
+        steps.append(.init(delay: metricsBase) { [weak self] in self?.syncHRVData(dayOffset: 0) })
+        steps.append(.init(delay: metricsBase + spacing) { [weak self] in self?.syncBloodOxygen(dayOffset: 0) })
+        steps.append(.init(delay: metricsBase + spacing * 2) { [weak self] in self?.syncPressureData(dayOffset: 0) })
+        steps.append(.init(delay: metricsBase + spacing * 3) { [weak self] in self?.syncActivityData(dayOffset: 0) })
+        steps.append(.init(delay: metricsBase + spacing * 4) { [weak self] in
             guard let self else { return }
             Task { @MainActor in await self.ensureHRLogSettings() }
         })
@@ -1376,14 +1378,14 @@ extension RingSessionManager {
         }
 
         // After SpO2 finishes (up to 60s), run HR spot-check for fresh reading.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 65) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.spotCheckChainHRDelay) { [weak self] in
             guard let self, self.peripheralConnected, self.sensorState == .idle else { return }
             tLog("[SyncOnConnect] Running HR spot-check")
             self.startSpotCheck(type: .realtimeHeartRate)
         }
 
         // Then temperature spot-check after HR.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 100) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.spotCheckChainTempDelay) { [weak self] in
             guard let self, self.peripheralConnected, self.sensorState == .idle,
                   self.realTimeTemperatureCelsius == nil else { return }
             tLog("[SyncOnConnect] Running temperature spot-check")
@@ -1461,9 +1463,9 @@ extension RingSessionManager {
         do {
             let packet = try makePacket(command: CMD.cmdSleepData, subData: [
                 UInt8(dayOffset & 0xFF),
-                15,
+                CMD.sleepQuerySlotCount,
                 0,
-                95
+                CMD.sleepQueryMaxEntries
             ])
             lastSleepDayOffset = dayOffset
             appendToDebugLog(direction: .sent, bytes: packet)
@@ -1597,7 +1599,7 @@ extension RingSessionManager {
         // When fetching "today" (offset 0), also fetch "yesterday UTC" so that
         // the earlier part of "today local" is included.
         if dayOffset == 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.bleCommandSpacing) { [weak self] in
                 self?.sendActivityRequest(dayOffset: 1)
             }
         }
@@ -1695,9 +1697,9 @@ extension RingSessionManager {
         let cutoff = now.addingTimeInterval(-sportRTWindowSeconds)
         sportRTBeatSamples.removeAll { $0.time < cutoff }
 
-        if let first = sportRTBeatSamples.first, sportRTBeatSamples.count >= 3 {
+        if let first = sportRTBeatSamples.first, sportRTBeatSamples.count >= RingConstants.sportRTMinSamples {
             let elapsed = now.timeIntervalSince(first.time)
-            if elapsed >= 3.0 {
+            if elapsed >= RingConstants.sportRTMinElapsed {
                 // Unwrap the counter (it's UInt8, wraps at 256)
                 var totalBeats = 0
                 for i in 1 ..< sportRTBeatSamples.count {
@@ -2174,7 +2176,7 @@ extension RingSessionManager {
         sendSettingRead(commandId: setting.commandId)
     }
 
-    /// Read one tracking setting from the ring (async); throws if not connected or times out after 5 s.
+    /// Read one tracking setting from the ring (async); throws if not connected or times out after trackingSettingTimeout.
     func readTrackingSetting(_ setting: RingTrackingSetting) async throws -> Bool {
         try await withCheckedThrowingContinuation { continuation in
             guard uartRxCharacteristic != nil, peripheral != nil else {
@@ -2187,7 +2189,7 @@ extension RingSessionManager {
             pendingTrackingSettingContinuation = continuation
             sendSettingRead(commandId: setting.commandId)
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.trackingSettingTimeout) { [weak self] in
                 guard let self, self.trackingSettingGeneration == gen, self.pendingTrackingSettingContinuation != nil else { return }
                 tLog("[TrackingSetting] Timeout waiting for \(setting.displayName) read response")
                 self.pendingTrackingSettingContinuation = nil
@@ -2197,7 +2199,7 @@ extension RingSessionManager {
         }
     }
 
-    /// Write one tracking setting to the ring (async); throws if not connected or times out after 5 s.
+    /// Write one tracking setting to the ring (async); throws if not connected or times out after trackingSettingTimeout.
     func writeTrackingSetting(_ setting: RingTrackingSetting, enabled: Bool) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
             guard uartRxCharacteristic != nil, peripheral != nil else {
@@ -2210,7 +2212,7 @@ extension RingSessionManager {
             pendingTrackingSettingContinuation = continuation
             sendSettingWrite(commandId: setting.commandId, isEnabled: enabled)
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.trackingSettingTimeout) { [weak self] in
                 guard let self, self.trackingSettingGeneration == gen, self.pendingTrackingSettingContinuation != nil else { return }
                 tLog("[TrackingSetting] Timeout waiting for \(setting.displayName) write response — assuming success")
                 self.pendingTrackingSettingContinuation = nil

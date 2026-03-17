@@ -33,10 +33,15 @@ enum RingConstants {
     static let cmdStopRealTime: UInt8        = 0x6A  // 106
     static let cmdPathwayAStop: UInt8        = 0x6B  // 107
     static let cmdSportRealTime: UInt8       = 0x73  // 115
+    /// Ack byte for CMD_REAL_TIME_HEART_RATE (0x1E + 0x80 = 0x9E).
+    /// The ring echoes command | 0x80 as acknowledgement.
+    static let cmdRealTimeHeartRateAck: UInt8 = 0x9E  // 158
 
     // MARK: - Big Data Protocol
 
     static let bigDataMagic: UInt8        = 188   // 0xBC
+    /// Big Data packet header: [magic, dataId, lenLo, lenHi, crc16Lo, crc16Hi].
+    static let bigDataHeaderLength: Int   = 6
     static let bigDataSleepId: UInt8      = 39
     static let bigDataBloodOxygenId: UInt8 = 42
 
@@ -72,6 +77,12 @@ enum RingConstants {
     /// Physiologically valid BPM range.
     static let validBPMMin: UInt8                 = 30
     static let validBPMMax: UInt8                 = 220
+    /// SpO2 physiologically valid range (%). Readings outside are sensor artefacts.
+    static let spo2RangeMin: Int                  = 70
+    static let spo2RangeMax: Int                  = 100
+    /// VC30F raw temperature divisor: raw 16-bit value / 20.0 = degrees Celsius.
+    /// e.g. raw 730 → 730 / 20.0 = 36.5 °C
+    static let tempRawDivisor: Double             = 20.0
 
     // MARK: - Keepalive Chain
     //
@@ -101,12 +112,20 @@ enum RingConstants {
     static let scanTimeout: TimeInterval          = 15
     /// Delay before retrying a stuck .connecting peripheral.
     static let connectRetryDelay: TimeInterval    = 0.5
+    /// Minimum spacing between sequential BLE commands to avoid overwhelming
+    /// the ring's single-threaded UART handler. 0.6s empirically reliable.
+    static let bleCommandSpacing: TimeInterval    = 0.6
 
     // MARK: - Sport RT (command 0x73)
 
     /// Sliding window for deriving HR from byte[10] cumulative beat counter.
     /// 10s gives enough samples for a reliable estimate while staying responsive.
     static let sportRTWindowSeconds: TimeInterval = 10.0
+    /// Minimum number of beat counter samples before computing a derived HR.
+    static let sportRTMinSamples: Int             = 3
+    /// Minimum elapsed time (s) in the sliding window before HR derivation is valid.
+    /// Prevents wild spikes from very short measurement windows.
+    static let sportRTMinElapsed: TimeInterval    = 3.0
 
     // MARK: - InfluxDB Write Throttle
 
@@ -124,4 +143,29 @@ enum RingConstants {
 
     /// If no keepalive was sent in 2× the interval, the chain is considered stalled.
     static let keepaliveStallMultiplier: Double = 2.0
+
+    // MARK: - Async Tracking Setting (read/write with timeout)
+
+    /// Timeout for ring tracking-setting read/write responses.
+    static let trackingSettingTimeout: TimeInterval = 5.0
+
+    // MARK: - Sync-on-Connect Spot-Check Chain
+    //
+    // After initial sync, the app runs SpO2 → HR → Temp spot-checks
+    // sequentially.  Each delay accounts for the previous check's
+    // timeout plus a small BLE settle buffer.
+
+    /// Delay before HR spot-check: SpO2 timeout (60s) + 5s buffer.
+    static let spotCheckChainHRDelay: TimeInterval   = 65
+    /// Delay before Temp spot-check: 60s + 20s + 20s margin.
+    static let spotCheckChainTempDelay: TimeInterval  = 100
+    /// Delay before retrying battery if no response after connect.
+    static let batteryRetryDelay: TimeInterval        = 5.0
+
+    // MARK: - Sleep Command Protocol (CMD 68)
+
+    /// Sub-data byte 1: number of 15-minute slots per query page.
+    static let sleepQuerySlotCount: UInt8  = 15
+    /// Sub-data byte 3: max entries per response page (0x5F = 95).
+    static let sleepQueryMaxEntries: UInt8 = 95
 }
