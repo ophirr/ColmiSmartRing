@@ -308,6 +308,10 @@ class RingSessionManager: NSObject {
     /// Big Data notify buffer (variable-length responses may arrive in chunks).
     private var bigDataBuffer: [UInt8] = []
 
+    /// Cancellable work items for the post-connect spot-check chain
+    /// (SpO2 → HR → Temp).  Stored so they can be cancelled on disconnect.
+    private var spotCheckChainWorkItems: [DispatchWorkItem] = []
+
     /// Cancellable command scheduler — replaces nested asyncAfter chains
     /// in syncOnConnect, runPeriodicSync, and handleBatteryResponse.
     private let syncScheduler = CommandScheduler()
@@ -712,6 +716,8 @@ extension RingSessionManager: CBCentralManagerDelegate {
         syncScheduler.cancel()
         periodicSyncScheduler.cancel()
         fullSyncScheduler.cancel()
+        spotCheckChainWorkItems.forEach { $0.cancel() }
+        spotCheckChainWorkItems.removeAll()
 
         // Resume any pending tracking-setting continuation so the caller
         // doesn't hang forever.  The generation counter ensures a stale
@@ -731,6 +737,11 @@ extension RingSessionManager: CBCentralManagerDelegate {
             pendingHRLogSettingsContinuation = nil
             continuation.resume(throwing: RingSessionTrackingError.notConnected)
         }
+
+        // Clear stale one-shot callbacks — if the ring disconnects before
+        // responding, these closures would hold references indefinitely.
+        batteryStatusCallback = nil
+        heartRateLogCallback = nil
 
         // Auto-reconnect: immediately issue a persistent connect request.
         // CoreBluetooth queues this and will complete it automatically when
@@ -1146,6 +1157,16 @@ extension RingSessionManager {
 
     private func processBigDataChunk(_ chunk: [UInt8]) {
         bigDataBuffer.append(contentsOf: chunk)
+
+        // Safety cap: discard the buffer if it grows beyond the expected
+        // maximum.  This prevents unbounded memory growth from corrupt
+        // BLE data that never forms a valid packet header.
+        if bigDataBuffer.count > CMD.bigDataBufferMaxBytes {
+            tLog("[BigData] Buffer exceeded \(CMD.bigDataBufferMaxBytes) bytes — discarding \(bigDataBuffer.count) bytes")
+            bigDataBuffer.removeAll()
+            return
+        }
+
         let headerLen = CMD.bigDataHeaderLength
         while bigDataBuffer.count >= headerLen {
             guard bigDataBuffer[0] == CMD.bigDataMagic else {
@@ -1270,7 +1291,7 @@ extension RingSessionManager {
         // spot-check flow.
         if gymWorkoutInProgress {
             tLog("[SyncOnConnect] Workout active on reconnect — restoring workout mode")
-            sensorState = .workout
+            transitionSensor(to: .workout)
             getBatteryStatus { _ in }
             DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.connectRetryDelay) { [weak self] in
                 guard let self, self.gymWorkoutInProgress else { return }
@@ -1378,19 +1399,27 @@ extension RingSessionManager {
         }
 
         // After SpO2 finishes (up to 60s), run HR spot-check for fresh reading.
-        DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.spotCheckChainHRDelay) { [weak self] in
+        // Store as cancellable work items so disconnect can cancel them.
+        spotCheckChainWorkItems.forEach { $0.cancel() }
+        spotCheckChainWorkItems.removeAll()
+
+        let hrItem = DispatchWorkItem { [weak self] in
             guard let self, self.peripheralConnected, self.sensorState == .idle else { return }
             tLog("[SyncOnConnect] Running HR spot-check")
             self.startSpotCheck(type: .realtimeHeartRate)
         }
+        spotCheckChainWorkItems.append(hrItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.spotCheckChainHRDelay, execute: hrItem)
 
         // Then temperature spot-check after HR.
-        DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.spotCheckChainTempDelay) { [weak self] in
+        let tempItem = DispatchWorkItem { [weak self] in
             guard let self, self.peripheralConnected, self.sensorState == .idle,
                   self.realTimeTemperatureCelsius == nil else { return }
             tLog("[SyncOnConnect] Running temperature spot-check")
             self.startSpotCheck(type: .temperature)
         }
+        spotCheckChainWorkItems.append(tempItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.spotCheckChainTempDelay, execute: tempItem)
 
         // Start the keepalive chain now that the initial sync is done.
         // The first ping fires after the full keepalive interval (60 s),
@@ -1833,6 +1862,12 @@ extension RingSessionManager {
         sendRealTimeStart(type: type)
     }
 
+    /// Mark the HR stream as "just restarted" so the gym watchdog doesn't
+    /// immediately re-fire.  Avoids GymSessionManager mutating our property directly.
+    func resetHRPacketTimestamp() {
+        lastRealTimeHRPacketTime = Date()
+    }
+
     func continueRealTimeStreaming(type: RealTimeReading) {
         tLog("[RealTime] CONTINUE \(type)")
         sendRealTimeCommand(command: CMD.cmdStartRealTime, type: type, action: .continue)
@@ -1877,19 +1912,9 @@ extension RingSessionManager {
         guard spotCheckActive else { return }
         spotCheckTimeoutTask?.cancel()
         spotCheckTimeoutTask = nil
-        let wasType = spotCheckType
-        // Teardown via transition, but avoid sending a redundant stop for
-        // the stream we already got a final reading from.  The transition
-        // teardown will handle the BLE stop command.
-        sensorState = .idle
-        if wasType == .spo2 {
-            spo2ContinueTimer?.invalidate()
-            spo2ContinueTimer = nil
-            sendSpO2Stop()
-        } else {
-            sendRealTimeStop(type: wasType)
-        }
-        tLog("[Sensor] spotCheck(\(wasType)) → idle (spot-check finished)")
+        // Use the centralized transition so teardown (timer cancellation,
+        // BLE stop commands, reading array cleanup) is handled uniformly.
+        transitionSensor(to: .idle)
         scheduleNextKeepalive()
     }
 
@@ -2289,6 +2314,16 @@ extension RingSessionManager {
             } catch {
                 pendingHRLogSettingsContinuation = nil
                 continuation.resume(throwing: error)
+                return
+            }
+
+            // Safety timeout — if the ring never responds, resume with error
+            // so the caller doesn't hang forever.
+            DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.trackingSettingTimeout) { [weak self] in
+                guard let self, let continuation = self.pendingHRLogSettingsContinuation else { return }
+                tLog("[HRLogSettings] Timeout waiting for read response")
+                self.pendingHRLogSettingsContinuation = nil
+                continuation.resume(throwing: RingSessionTrackingError.timeout)
             }
         }
     }

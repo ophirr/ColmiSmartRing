@@ -50,6 +50,12 @@ enum RingConstants {
     static let settingsActionRead: UInt8  = 1
     static let settingsActionWrite: UInt8 = 2
 
+    /// Maximum bytes the Big Data reassembly buffer may accumulate.
+    /// If corrupt BLE data arrives without valid headers, the buffer is
+    /// capped to prevent unbounded memory growth. 16 KB is ~2× the
+    /// largest expected Big Data response (sleep payload ~6-8 KB).
+    static let bigDataBufferMaxBytes: Int = 16_384
+
     // MARK: - Spot-Check Timeouts
     //
     // The VC30F PPG sensor needs a warmup period after every cold start.

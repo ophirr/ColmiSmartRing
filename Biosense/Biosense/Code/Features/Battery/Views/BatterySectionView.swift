@@ -22,7 +22,7 @@ struct BatterySectionView: View {
                     Text("\(info.batteryLevel)%")
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                        .frame(width: 42, alignment: .trailing)
+                        .fixedSize()
 
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
@@ -36,6 +36,7 @@ struct BatterySectionView: View {
                         }
                     }
                     .frame(height: 6)
+                    .layoutPriority(-1)
 
                     if info.charging {
                         HStack(spacing: 2) {

@@ -144,6 +144,9 @@ class GymSessionManager {
 
     func startWorkout() {
         guard workoutState == .idle || workoutState == .finished else { return }
+        // Cancel any orphaned tasks from a previous session before resetting.
+        timerTask?.cancel()
+        continueTask?.cancel()
         resetState()
         workoutState = .active
         workoutStartTime = Date()
@@ -372,7 +375,7 @@ class GymSessionManager {
                 if age >= threshold {
                     tLog("[GymWatchdog] No HR packets for \(Int(age))s (\(inColdStart ? "cold start" : "silence")) — restarting stream")
                     ringManager?.startRealTimeStreaming(type: .realtimeHeartRate)
-                    ringManager?.lastRealTimeHRPacketTime = now  // Prevent re-firing
+                    ringManager?.resetHRPacketTimestamp()  // Prevent re-firing
                     watchdogFired = true
                     lastWatchdogRestartTime = now
                 }
