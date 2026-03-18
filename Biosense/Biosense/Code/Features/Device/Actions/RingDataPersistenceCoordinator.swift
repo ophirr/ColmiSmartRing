@@ -87,7 +87,8 @@ final class RingDataPersistenceCoordinator {
             for day in bigData.days {
                 let daysAgo = Int(day.daysAgo)
                 let nightDate = calendar.date(byAdding: .day, value: -daysAgo, to: today) ?? today
-                let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(Int(day.sleepStart) * 60))
+                let utcOffset = TimeZone.current.secondsFromGMT(for: nightDate)
+                let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(Int(day.sleepStart) * 60 + utcOffset))
                 var elapsed = 0
                 for period in day.periods {
                     let periodStart = sleepStartDate.addingTimeInterval(TimeInterval(elapsed * 60))
@@ -99,7 +100,11 @@ final class RingDataPersistenceCoordinator {
     }
 
     private func makeStoredPeriods(from day: SleepDay, nightDate: Date) -> [StoredSleepPeriod] {
-        let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(Int(day.sleepStart) * 60))
+        // Ring clock is UTC, so sleepStart is minutes-after-UTC-midnight.
+        // nightDate is local midnight. Apply UTC offset to convert.
+        let utcOffsetSeconds = TimeZone.current.secondsFromGMT(for: nightDate)
+        let localSleepStartSeconds = Int(day.sleepStart) * 60 + utcOffsetSeconds
+        let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(localSleepStartSeconds))
         var elapsedMinutes = 0
         return day.periods.map { period in
             let start = sleepStartDate.addingTimeInterval(TimeInterval(elapsedMinutes * 60))

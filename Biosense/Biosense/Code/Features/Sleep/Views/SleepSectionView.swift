@@ -169,7 +169,11 @@ struct SleepSectionView: View {
     }
 
     private func makeStoredPeriods(from day: SleepDay, nightDate: Date) -> [StoredSleepPeriod] {
-        let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(Int(day.sleepStart) * 60))
+        // Ring clock is UTC, so sleepStart is minutes-after-UTC-midnight.
+        // nightDate is local midnight. Apply UTC offset to convert.
+        let utcOffsetSeconds = TimeZone.current.secondsFromGMT(for: nightDate)
+        let localSleepStartSeconds = Int(day.sleepStart) * 60 + utcOffsetSeconds
+        let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(localSleepStartSeconds))
         var elapsedMinutes = 0
         return day.periods.map { period in
             let start = sleepStartDate.addingTimeInterval(TimeInterval(elapsedMinutes * 60))
