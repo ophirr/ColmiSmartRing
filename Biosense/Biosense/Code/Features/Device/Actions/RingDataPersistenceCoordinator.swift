@@ -121,14 +121,38 @@ final class RingDataPersistenceCoordinator {
         let descriptor = FetchDescriptor<StoredHeartRateLog>(
             predicate: #Predicate<StoredHeartRateLog> { $0.dayStart == dayStart }
         )
+        let newNonZero = log.heartRates.filter { $0 > 0 }.count
         let action: String
         if let existing = (try? modelContext.fetch(descriptor))?.first {
-            existing.timestamp = log.timestamp
-            existing.heartRates = log.heartRates
-            existing.size = log.size
-            existing.index = log.index
-            existing.range = log.range
-            action = "UPDATE"
+            // Always merge: overlay new non-zero readings onto existing data.
+            // This prevents data loss when the ring resets its log (midnight
+            // reboot, interval change) and sends back a sparse log that would
+            // overwrite a richer existing dataset.
+            let fineRange = min(existing.range, log.range)
+            let slotsPerDay = (24 * 60) / max(fineRange, 1)
+            var merged = expandToSlots(existing.heartRates, fromRange: existing.range, toSlots: slotsPerDay)
+            let incoming = expandToSlots(log.heartRates, fromRange: log.range, toSlots: slotsPerDay)
+            // Overlay: new non-zero readings replace existing slots.
+            for i in 0..<min(merged.count, incoming.count) {
+                if incoming[i] > 0 { merged[i] = incoming[i] }
+            }
+            let existingNonZero = existing.heartRates.filter { $0 > 0 }.count
+            let mergedNonZero = merged.filter { $0 > 0 }.count
+            // Safety: never reduce the number of non-zero readings.
+            // This guards against expand/contract rounding or any edge case
+            // where the merge would lose data.
+            if mergedNonZero >= existingNonZero {
+                existing.heartRates = merged
+                existing.range = fineRange
+                existing.size = 24
+                existing.index = merged.count
+                existing.timestamp = log.timestamp
+                tLog("[AutoPersist] HR log MERGED — stored range=\(fineRange)min, \(mergedNonZero) non-zero slots (was \(existingNonZero))")
+                action = "MERGE"
+            } else {
+                tLog("[AutoPersist] HR log merge SKIPPED — would reduce non-zero from \(existingNonZero) to \(mergedNonZero), keeping existing")
+                action = "KEPT"
+            }
         } else {
             let stored = StoredHeartRateLog.from(log)
             stored.dayStart = dayStart   // Override with requested day
@@ -136,8 +160,7 @@ final class RingDataPersistenceCoordinator {
             action = "INSERT"
         }
 
-        let nonZeroCount = log.heartRates.filter { $0 > 0 }.count
-        tLog("[AutoPersist] Heart rate log save requested. action=\(action) dayStart=\(formatDate(dayStart)) range=\(log.range)min nonZero=\(nonZeroCount)/\(log.heartRates.count)")
+        tLog("[AutoPersist] Heart rate log save requested. action=\(action) dayStart=\(formatDate(dayStart)) range=\(log.range)min nonZero=\(newNonZero)/\(log.heartRates.count)")
         _ = saveContext(tag: "HeartRate")
 
         // Stream to InfluxDB using UTC-anchored timestamps (raw ring slots are UTC-indexed).
@@ -152,6 +175,30 @@ final class RingDataPersistenceCoordinator {
             }
         } else {
             tLog("[AutoPersist] HR log → InfluxDB: no non-zero readings")
+        }
+    }
+
+    /// Expand (or contract) an HR slot array to a target number of slots.
+    /// E.g. 288 slots at 5-min → 1440 slots at 1-min (each value repeated 5×),
+    /// or 1440 slots at 1-min → 288 slots at 5-min (each group of 5 averaged).
+    private func expandToSlots(_ heartRates: [Int], fromRange: Int, toSlots: Int) -> [Int] {
+        let fromRange = max(fromRange, 1)
+        let fromSlots = (24 * 60) / fromRange
+        let hrs = Array(heartRates.prefix(fromSlots))
+        if toSlots == fromSlots { return hrs }
+        if toSlots > fromSlots {
+            // Expanding (e.g. 5-min → 1-min): repeat each value
+            let factor = toSlots / fromSlots
+            return hrs.flatMap { Array(repeating: $0, count: factor) }
+        } else {
+            // Contracting (e.g. 1-min → 5-min): take first non-zero in each group
+            let factor = fromSlots / toSlots
+            var result = [Int]()
+            for i in 0..<toSlots {
+                let group = hrs[i * factor ..< min((i + 1) * factor, hrs.count)]
+                result.append(group.first(where: { $0 > 0 }) ?? 0)
+            }
+            return result
         }
     }
 

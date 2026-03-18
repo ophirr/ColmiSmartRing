@@ -63,11 +63,15 @@ struct DeviceSectionView: View {
                 .frame(height: 70)
                 .accessibilityHidden(true)
 
-            VStack(alignment: .leading) {
-                Text(displayName)
-                    .font(Font.headline.weight(.semibold))
-                    .dynamicTypeSize(...DynamicTypeSize.accessibility3)
-            }
+            Text(displayName)
+                .font(Font.headline.weight(.semibold))
+                .dynamicTypeSize(...DynamicTypeSize.accessibility3)
+
+            Spacer()
+
+            Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }

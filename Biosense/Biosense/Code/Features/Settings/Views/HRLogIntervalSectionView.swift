@@ -73,10 +73,11 @@ struct HRLogIntervalSectionView: View {
                     Text("Sending…")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else if let interval = ringInterval, let enabled = ringEnabled {
+                } else if let enabled = ringEnabled ?? (isConnected ? true : nil) {
+                    let displayInterval = savedInterval
                     Image(systemName: enabled ? "checkmark.circle.fill" : "xmark.circle")
                         .foregroundStyle(enabled ? .green : .secondary)
-                    Text(enabled ? "Ring logging every \(interval) min" : "Ring logging disabled")
+                    Text(enabled ? "Ring logging every \(displayInterval) min" : "Ring logging disabled")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else if !isConnected {
