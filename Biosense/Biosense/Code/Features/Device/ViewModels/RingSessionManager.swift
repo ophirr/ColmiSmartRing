@@ -71,6 +71,8 @@ class RingSessionManager: NSObject {
     var realTimeTemperatureCelsius: Double?
     /// Latest battery info reported by the ring.
     var currentBatteryInfo: BatteryInfo?
+    /// Tracks battery drain history for real-time life estimation.
+    let batteryEstimator = BatteryEstimator()
     /// True when we have a saved ring but no peripheral and are scanning for it.
     var isScanningForRing = false
     /// Peripherals found during "Add ring" scan (name starts with R02_).
@@ -1952,6 +1954,13 @@ extension RingSessionManager {
         let charging = packet[2] != 0
         let batteryInfo = BatteryInfo(batteryLevel: batteryLevel, charging: charging)
         currentBatteryInfo = batteryInfo
+
+        // Stream battery level to InfluxDB and record for drain-rate estimation.
+        let now = Date()
+        Task { @MainActor in
+            InfluxDBWriter.shared.writeBattery(level: batteryLevel, charging: charging, time: now)
+        }
+        batteryEstimator.record(level: batteryLevel, charging: charging)
 
         // Trigger stored callback with battery info
         batteryStatusCallback?(batteryInfo)

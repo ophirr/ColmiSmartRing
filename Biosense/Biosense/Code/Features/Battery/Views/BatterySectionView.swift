@@ -49,10 +49,17 @@ struct BatterySectionView: View {
                         }
                         .fixedSize()
                     } else {
-                        Text(batteryEstimate(info.batteryLevel))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize()
+                        VStack(alignment: .trailing, spacing: 1) {
+                            Text(batteryEstimate(info.batteryLevel))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if let rate = ringSessionManager.batteryEstimator.drainRateString() {
+                                Text(rate)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .fixedSize()
                     }
                 }
             } else {
@@ -97,6 +104,11 @@ struct BatterySectionView: View {
     }
 
     private func batteryEstimate(_ level: Int) -> String {
+        // Prefer real drain-rate estimate from observed battery history.
+        if let real = ringSessionManager.batteryEstimator.estimatedTimeRemaining(currentLevel: level) {
+            return real
+        }
+        // Fallback: hardcoded lookup table (used until enough drain data is collected).
         let interval = ringSessionManager.hrLogIntervalMinutes ?? 5
         let baseDays: Double = switch interval {
         case 1:  1.2

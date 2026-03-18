@@ -262,7 +262,10 @@ final class InfluxDBWriter {
     }
 
     func writeBattery(level: Int, charging: Bool, time: Date) {
-        write("battery,source=colmi_r02\(tag) level=\(level)i,charging=\(charging ? "true" : "false") \(epochSeconds(time))")
+        // Only write level — InfluxDB Cloud schema locked `charging` as boolean
+        // from earlier writes, and changing to integer causes schema conflicts.
+        // Charging state is tracked locally by BatteryEstimator.
+        write("battery,source=colmi_r02\(tag) level=\(level)i \(epochSeconds(time))")
     }
 
     // MARK: - Flush

@@ -13,7 +13,7 @@ enum AppSettings {
 
     /// Full version string shown in the Profile view.
     /// Update this on each commit (matches git tag).
-    static let appVersion = "1.5.8"
+    static let appVersion = "1.5.9"
 
     // MARK: - Ring identity & connection
 
