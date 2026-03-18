@@ -69,7 +69,7 @@ struct DeviceSectionView: View {
 
             Spacer()
 
-            Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
+            Text("v\(AppSettings.appVersion)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

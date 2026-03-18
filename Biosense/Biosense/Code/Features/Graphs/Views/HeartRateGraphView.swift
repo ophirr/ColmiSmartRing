@@ -19,6 +19,12 @@ struct HeartRateGraphView: View {
     var timeRange: TimeRange = .day
     var xDomain: ClosedRange<Date>? = nil
 
+    private var yDomain: ClosedRange<Int> {
+        let values = data.map(\.heartRate)
+        guard let lo = values.min(), let hi = values.max() else { return 40...150 }
+        return max(lo - 10, 0)...hi + 10
+    }
+
     var body: some View {
         Chart {
             ForEach(data) { point in
@@ -29,6 +35,7 @@ struct HeartRateGraphView: View {
                 .interpolationMethod(.catmullRom)
             }
         }
+        .chartYScale(domain: yDomain)
         .chartYAxis {
             AxisMarks(position: .leading)
         }

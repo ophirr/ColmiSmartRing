@@ -11,6 +11,10 @@ import Foundation
 
 enum AppSettings {
 
+    /// Full version string shown in the Profile view.
+    /// Update this on each commit (matches git tag).
+    static let appVersion = "1.5.7"
+
     // MARK: - Ring identity & connection
 
     enum Ring {

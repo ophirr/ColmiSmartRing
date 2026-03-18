@@ -287,7 +287,7 @@ struct BloodOxygenChartView: View {
     let data: [TimeSeriesPoint]
     var title: String = "Blood Oxygen"
     var unit: String = "%"
-    var yRange: ClosedRange<Double> = 85...100
+    var yRange: ClosedRange<Double> = 85...101
     var timeRange: TimeRange = .day
     var xDomain: ClosedRange<Date>? = nil
 
@@ -329,14 +329,19 @@ struct BloodOxygenChartView: View {
     }
 }
 
-// MARK: - Stress (0–100, bar or line)
+// MARK: - Stress (dynamic range, line chart)
 
 struct StressChartView: View {
     let data: [TimeSeriesPoint]
     var title: String = "Stress"
-    var yRange: ClosedRange<Double> = 0...100
     var timeRange: TimeRange = .day
     var xDomain: ClosedRange<Date>? = nil
+
+    private var yRange: ClosedRange<Double> {
+        let values = data.map(\.value)
+        guard let lo = values.min(), let hi = values.max() else { return 0...100 }
+        return max(lo - 10, 0)...(hi + 10)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -345,11 +350,11 @@ struct StressChartView: View {
                 .foregroundStyle(.secondary)
             Chart(data) { point in
                 if timeRange == .day {
-                    BarMark(
+                    LineMark(
                         x: .value("Time", point.time),
-                        y: .value("Stress", point.value),
-                        width: .fixed(6)
+                        y: .value("Stress", point.value)
                     )
+                    .interpolationMethod(.catmullRom)
                     .foregroundStyle(Color.mint.gradient)
                 } else {
                     BarMark(
