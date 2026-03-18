@@ -43,13 +43,17 @@ struct HRLogIntervalSectionView: View {
                     Text("1").font(.caption2).foregroundStyle(.secondary)
                 } maximumValueLabel: {
                     Text("10").font(.caption2).foregroundStyle(.secondary)
+                } onEditingChanged: { editing in
+                    // Only save and send when the user finishes dragging.
+                    // This prevents ring-response-driven slider updates from
+                    // triggering BLE writes or overwriting savedInterval.
+                    if !editing {
+                        let minutes = Int(sliderValue)
+                        savedInterval = minutes
+                        sendSettings(enabled: true, interval: minutes)
+                    }
                 }
                 .disabled(!isConnected || isSending)
-                .onChange(of: sliderValue) { _, newValue in
-                    let minutes = Int(newValue)
-                    savedInterval = minutes
-                    sendSettings(enabled: true, interval: minutes)
-                }
 
                 // Battery impact hint
                 HStack(spacing: 4) {
@@ -95,19 +99,7 @@ struct HRLogIntervalSectionView: View {
             Text("Controls how often the ring wakes the PPG sensor for a background heart rate reading. Lower intervals give more data but drain the battery faster.")
         }
         .onAppear {
-            // Initialize slider from saved or ring value
-            if let ringVal = ringInterval {
-                sliderValue = Double(ringVal)
-                savedInterval = ringVal
-            } else {
-                sliderValue = Double(savedInterval)
-            }
-        }
-        .onChange(of: ringInterval) { _, newVal in
-            if let newVal {
-                sliderValue = Double(newVal)
-                savedInterval = newVal
-            }
+            sliderValue = Double(savedInterval)
         }
     }
 
