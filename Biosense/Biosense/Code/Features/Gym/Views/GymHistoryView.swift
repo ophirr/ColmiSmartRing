@@ -65,6 +65,18 @@ struct GymHistoryView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
+            if let distM = session.sportDistanceM, distM > 0 {
+                HStack(spacing: 16) {
+                    if let steps = session.sportRTSteps, steps > 0 {
+                        Label("\(steps) steps", systemImage: "figure.run")
+                    }
+                    Label(String(format: "%.2f km", Double(distM) / 1000.0), systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                    Label("\(session.estimatedCalories) cal", systemImage: "flame.fill")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
             // Mini zone bar
             miniZoneBar(session.zoneTimeSeconds)
                 .frame(height: 6)
