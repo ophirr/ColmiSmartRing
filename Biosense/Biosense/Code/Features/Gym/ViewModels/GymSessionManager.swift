@@ -68,6 +68,15 @@ class GymSessionManager {
         }
     }
 
+    /// Calibration factor applied to the ring's raw distance reading.
+    /// Default 1.0 (no correction). Values <1.0 reduce reported distance
+    /// (e.g. 0.88 corrects a ~12% overestimate from the ring's generic stride model).
+    var distanceCalibrationFactor: Double {
+        didSet {
+            UserDefaults.standard.set(distanceCalibrationFactor, forKey: Self.distanceCalibrationKey)
+        }
+    }
+
     /// True when the ring is connected and streaming HR data.
     var isReceivingData: Bool { currentBPM > 0 }
 
@@ -76,6 +85,7 @@ class GymSessionManager {
     private static let zoneConfigKey = AppSettings.Gym.zoneConfig
     private static let ringFingerKey = AppSettings.Gym.ringFinger
     private static let hapticsKey = AppSettings.Gym.hapticsEnabled
+    private static let distanceCalibrationKey = AppSettings.Gym.distanceCalibrationFactor
     private static let hrPollInterval: TimeInterval = 1.0
 
     /// Aggressive watchdog: the ring's firmware silently stops 0x69 packets
@@ -139,6 +149,10 @@ class GymSessionManager {
         } else {
             self.hapticsEnabled = true
         }
+
+        // Load distance calibration factor (0.0 = never set → default 1.0)
+        let savedCal = UserDefaults.standard.double(forKey: Self.distanceCalibrationKey)
+        self.distanceCalibrationFactor = savedCal > 0 ? savedCal : 1.0
 
         // Pre-warm haptic engines
         hapticEngine.prepare()
@@ -439,7 +453,7 @@ class GymSessionManager {
         // ── Phone sport data (0x78 notifications) ──────────────────
         if let rm = ringManager, rm.phoneSportActive {
             sportSteps = rm.phoneSportSteps
-            sportDistanceM = rm.phoneSportDistanceM
+            sportDistanceM = Int(Double(rm.phoneSportDistanceM) * distanceCalibrationFactor)
         }
     }
 

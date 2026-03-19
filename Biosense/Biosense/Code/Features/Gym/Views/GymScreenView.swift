@@ -597,6 +597,40 @@ struct GymSettingsSheet: View {
                     }
                 }
 
+                // MARK: Distance Calibration
+                Section("Distance Calibration") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Factor")
+                            Spacer()
+                            Text(String(format: "%.2f", gymManager.distanceCalibrationFactor))
+                                .font(.body.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Slider(
+                            value: Binding(
+                                get: { gymManager.distanceCalibrationFactor },
+                                set: { gymManager.distanceCalibrationFactor = $0 }
+                            ),
+                            in: 0.70...1.30,
+                            step: 0.01
+                        )
+
+                        Text("Adjusts the ring's reported distance. Default 1.00. Lower values reduce distance (e.g. 0.88 corrects a 12% overestimate).")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+
+                        if gymManager.distanceCalibrationFactor != 1.0 {
+                            Button("Reset to Default") {
+                                gymManager.distanceCalibrationFactor = 1.0
+                            }
+                            .font(.footnote)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 // MARK: Info
                 Section("About") {
                     HStack {

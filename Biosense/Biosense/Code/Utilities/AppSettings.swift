@@ -13,7 +13,7 @@ enum AppSettings {
 
     /// Full version string shown in the Profile view.
     /// Update this on each commit (matches git tag).
-    static let appVersion = "1.5.9"
+    static let appVersion = "1.6"
 
     // MARK: - Ring identity & connection
 
@@ -44,6 +44,7 @@ enum AppSettings {
         static let zoneConfig = "gymZoneConfig"
         static let ringFinger = "gymRingFinger"
         static let hapticsEnabled = "gymHapticsEnabled"
+        static let distanceCalibrationFactor = "gymDistanceCalibrationFactor"
     }
 
     // MARK: - Data migration flags

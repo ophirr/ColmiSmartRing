@@ -77,7 +77,12 @@ class RingSessionManager: NSObject {
     /// Latest calories from 0x78 sport notifications.
     var phoneSportCalories: Int = 0
     /// Latest sport duration (seconds) from 0x78 sport notifications.
+    /// Handles uint8 wrap: byte[4] wraps at 255, so this accumulates total elapsed.
     var phoneSportDurationSec: Int = 0
+    /// Accumulates 256-second increments when byte[4] (uint8 elapsed) wraps.
+    private var phoneSportElapsedAccumulator: Int = 0
+    /// Previous raw elapsed value from 0x78, used to detect uint8 wrap.
+    private var phoneSportLastRawElapsed: Int = 0
     /// Running steps from CMD 0x48 — exposed for UI display.
     var todayRunningSteps: Int = 0
 
@@ -1703,6 +1708,8 @@ extension RingSessionManager {
                 phoneSportHR = 0
                 phoneSportCalories = 0
                 phoneSportDurationSec = 0
+                phoneSportElapsedAccumulator = 0
+                phoneSportLastRawElapsed = 0
             } else if action == .end {
                 phoneSportActive = false
             }
@@ -1749,13 +1756,21 @@ extension RingSessionManager {
         let steps     = readBE24(9)
         let calories  = readBE24(12)
 
-        phoneSportDurationSec = elapsed
+        // Detect uint8 wrap: byte[4] is a uint8 (0-255) that wraps for workouts >4:15.
+        // Packets arrive ~1/s, so a large backward jump means a wrap occurred.
+        if phoneSportLastRawElapsed > elapsed && (phoneSportLastRawElapsed - elapsed) > 200 {
+            phoneSportElapsedAccumulator += 256
+            tLog("[PhoneSportNotify] Elapsed uint8 wrap detected: \(phoneSportLastRawElapsed) -> \(elapsed), accumulator now \(phoneSportElapsedAccumulator)")
+        }
+        phoneSportLastRawElapsed = elapsed
+        phoneSportDurationSec = phoneSportElapsedAccumulator + elapsed
+
         phoneSportHR = hr
         phoneSportSteps = steps
         phoneSportDistanceM = distance
         phoneSportCalories = calories / 1000  // milli-kcal → kcal
 
-        tLog("[PhoneSportNotify] type=\(sportType) status=\(status) elapsed=\(elapsed)s hr=\(hr) steps=\(steps) dist=\(distance)m cal=\(calories)mCal raw=\(packet.prefix(15).map { String(format: "%02x", $0) }.joined(separator: " "))")
+        tLog("[PhoneSportNotify] type=\(sportType) status=\(status) elapsed=\(phoneSportDurationSec)s(raw:\(elapsed)) hr=\(hr) steps=\(steps) dist=\(distance)m cal=\(calories)mCal raw=\(packet.prefix(15).map { String(format: "%02x", $0) }.joined(separator: " "))")
 
         // If status 3 — ring autonomously ended the session
         if status == 3 {
