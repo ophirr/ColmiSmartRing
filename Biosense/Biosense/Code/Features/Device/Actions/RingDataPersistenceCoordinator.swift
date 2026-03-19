@@ -172,7 +172,7 @@ final class RingDataPersistenceCoordinator {
         let readings = log.heartRatesWithTimesUTC()
         if !readings.isEmpty {
             tLog("[AutoPersist] HR log → InfluxDB: \(readings.count) non-zero readings (UTC-anchored)")
-            influx.writeHeartRates(readings.map { (bpm: $0.0, time: $0.1) })
+            influx.writeHeartRates(readings.map { (bpm: $0.0, time: $0.1) }, tagged: false)
 
             // Also write to HealthKit so Apple Health reflects the full HR history.
             Task { @MainActor in
@@ -342,6 +342,14 @@ final class RingDataPersistenceCoordinator {
     /// Upsert activity samples grouped by their actual date (from the ring).
     /// Each 15-minute slot is stored individually; multiple slots in the same
     /// hour are stored separately so the Activity chart can show intra-hour data.
+    /// Hourly activity bucket accepted for fan-out to InfluxDB / HealthKit.
+    private struct AcceptedHourBucket {
+        let timestamp: Date
+        let steps: Int
+        let distanceKm: Double
+        let calories: Int
+    }
+
     private func flushActivityBatch() {
         let batch = activityBatch
         activityBatch = []
@@ -349,11 +357,30 @@ final class RingDataPersistenceCoordinator {
 
         guard !batch.isEmpty else { return }
 
+        // Deduplicate: if back-to-back syncs fire before the flush timer,
+        // the batch can contain the same (date, hour, minute) slot twice.
+        // Keep only the last occurrence of each unique slot (the freshest data).
+        var seen = Set<String>()
+        var deduped: [ParsedActivitySlot] = []
+        for slot in batch.reversed() {
+            let key = "\(slot.date.timeIntervalSince1970)-\(slot.hour)-\(slot.minute)"
+            if seen.insert(key).inserted {
+                deduped.append(slot)
+            }
+        }
+        deduped.reverse()  // restore chronological order
+
+        if deduped.count < batch.count {
+            tLog("[Activity] Deduplicated batch: \(batch.count) → \(deduped.count) slots")
+        }
+
         // Group by date so we can fetch/upsert per-day
-        let byDate = Dictionary(grouping: batch) { $0.date }
+        let byDate = Dictionary(grouping: deduped) { $0.date }
 
         var totalUpdated = 0
         var totalInserted = 0
+        var totalSkipped = 0
+        var accepted: [AcceptedHourBucket] = []
 
         for (dayStart, slots) in byDate {
             let dayEnd = Calendar.current.date(byAdding: .day, value: 1, to: dayStart)!
@@ -377,38 +404,39 @@ final class RingDataPersistenceCoordinator {
                 let timestamp = dayStart.addingTimeInterval(TimeInterval(hour * 3600))
 
                 if let match = existingByHour[hour]?.first {
-                    match.steps = totalSteps
-                    match.distanceKm = distanceKm
-                    match.calories = totalCal
-                    match.timestamp = timestamp
-                    totalUpdated += 1
+                    // Never reduce — the ring can return partial/stale data for the
+                    // current active slot, and a later sync should not erase a higher
+                    // value that was captured mid-activity (e.g. during a workout).
+                    if totalSteps >= match.steps {
+                        match.steps = totalSteps
+                        match.distanceKm = distanceKm
+                        match.calories = totalCal
+                        match.timestamp = timestamp
+                        totalUpdated += 1
+                        accepted.append(AcceptedHourBucket(timestamp: timestamp, steps: totalSteps, distanceKm: distanceKm, calories: totalCal))
+                    } else {
+                        tLog("[AutoPersist] Activity hour \(hour): keeping existing \(match.steps) steps (new \(totalSteps) is lower)")
+                        totalSkipped += 1
+                    }
                 } else {
                     modelContext.insert(StoredActivitySample(
                         timestamp: timestamp, steps: totalSteps,
                         distanceKm: distanceKm, calories: totalCal))
                     totalInserted += 1
+                    accepted.append(AcceptedHourBucket(timestamp: timestamp, steps: totalSteps, distanceKm: distanceKm, calories: totalCal))
                 }
             }
         }
 
-        tLog("[AutoPersist] Activity flush: updated \(totalUpdated), inserted \(totalInserted) across \(byDate.count) day(s)")
+        tLog("[AutoPersist] Activity flush: updated \(totalUpdated), inserted \(totalInserted), skipped \(totalSkipped) across \(byDate.count) day(s)")
 
         if saveContext(tag: "Activity") {
-            // Fan out to HealthKit + InfluxDB
-            let hourlyByDate = Dictionary(grouping: batch) { $0.date }
-            for (dayStart, slots) in hourlyByDate {
-                let hourlyBuckets = Dictionary(grouping: slots) { $0.hour }
-                for (hour, hourSlots) in hourlyBuckets {
-                    let totalSteps = hourSlots.reduce(0) { $0 + $1.steps }
-                    let totalDist = hourSlots.reduce(0) { $0 + $1.distanceMeters }
-                    let totalCal = hourSlots.reduce(0) { $0 + $1.calories }
-                    let distanceKm = Double(totalDist) / 1000.0
-                    let timestamp = dayStart.addingTimeInterval(TimeInterval(hour * 3600))
-                    Task { @MainActor in
-                        await healthActivityWriter.writeActivitySample(timestamp: timestamp, steps: totalSteps, calories: totalCal)
-                    }
-                    influx.writeActivity(steps: totalSteps, calories: totalCal, distanceKm: distanceKm, time: timestamp)
+            // Fan out only accepted (non-regressing) buckets to HealthKit + InfluxDB
+            for bucket in accepted {
+                Task { @MainActor in
+                    await healthActivityWriter.writeActivitySample(timestamp: bucket.timestamp, steps: bucket.steps, calories: bucket.calories)
                 }
+                influx.writeActivity(steps: bucket.steps, calories: bucket.calories, distanceKm: bucket.distanceKm, time: bucket.timestamp)
             }
         }
     }
@@ -541,7 +569,7 @@ final class RingDataPersistenceCoordinator {
 
         // Fan out to InfluxDB (deduplicates by timestamp)
         for point in series {
-            influx.writeSpO2(value: point.value, time: point.time)
+            influx.writeSpO2(value: point.value, time: point.time, tagged: false)
         }
 
         // Fan out to HealthKit (SyncIdentifier deduplicates)

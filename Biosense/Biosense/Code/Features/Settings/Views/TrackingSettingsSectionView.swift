@@ -27,10 +27,12 @@ struct TrackingSettingsSectionView: View {
             }
         }
         .onAppear {
-            ringSessionManager.onReadyForSettingsQuery = {
+            if ringSessionManager.peripheralConnected {
                 Task { @MainActor in await loadTrackingSettingsFromRing() }
             }
-            if ringSessionManager.peripheralConnected {
+        }
+        .onChange(of: ringSessionManager.isReadyForSettingsQuery) {
+            if ringSessionManager.isReadyForSettingsQuery {
                 Task { @MainActor in await loadTrackingSettingsFromRing() }
             }
         }

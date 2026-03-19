@@ -63,6 +63,24 @@ class RingSessionManager: NSObject {
 
     /// How many seconds of history to use for the sliding-window HR estimate.
     private let sportRTWindowSeconds: TimeInterval = RingConstants.sportRTWindowSeconds
+
+    // MARK: Phone Sport Mode (0x77 / 0x78)
+
+    /// Whether phone sport mode is currently active on the ring.
+    private(set) var phoneSportActive = false
+    /// Latest step count from 0x78 sport notifications (session-scoped).
+    var phoneSportSteps: Int = 0
+    /// Latest distance (meters) from 0x78 sport notifications.
+    var phoneSportDistanceM: Int = 0
+    /// Latest HR from 0x78 sport notifications.
+    var phoneSportHR: Int = 0
+    /// Latest calories from 0x78 sport notifications.
+    var phoneSportCalories: Int = 0
+    /// Latest sport duration (seconds) from 0x78 sport notifications.
+    var phoneSportDurationSec: Int = 0
+    /// Running steps from CMD 0x48 — exposed for UI display.
+    var todayRunningSteps: Int = 0
+
     /// Latest real-time blood oxygen reading in percent.
     var realTimeBloodOxygenPercent: Int?
     /// Timer that sends continue keepalives to keep the SpO2 measurement alive.
@@ -203,17 +221,15 @@ class RingSessionManager: NSObject {
     /// Maps UTC-midnight target (sent to ring) → local day-start (for persistence/UI).
     /// Keyed lookup avoids FIFO ordering fragility when NoData responses shift the queue.
     private var heartRateLogUTCToLocalDay: [Date: Date] = [:]
-    /// Called with each raw sleep response packet (16 bytes) for debugging / future parsing
     /// Delegate for persisting ring data. Set by RingDataPersistenceCoordinator.
     weak var dataDelegate: RingDataDelegate?
-    /// Called with each raw sleep response packet (16 bytes) for debugging.
-    var sleepPacketCallback: (([UInt8]) -> Void)?
-    /// Called when sleep data (command 68) is received; dayOffset is the requested day (0 = today).
-    var sleepDataCallback: ((SleepData) -> Void)?
-    /// Called when Big Data sleep (dataId 39) is received from Colmi service (UI observer).
-    var bigDataSleepCallback: ((BigDataSleepData) -> Void)?
-    /// Called when the ring is connected and UART characteristics are ready; use this to trigger tracking-settings reads.
-    var onReadyForSettingsQuery: (() -> Void)?
+    /// Latest Big Data sleep result, observable by SwiftUI views.
+    var lastBigDataSleep: BigDataSleepData?
+    /// Latest legacy sleep data (command 68), observable by SwiftUI views.
+    var lastSleepData: SleepData?
+    /// Set to `true` when the ring is connected and UART characteristics are ready.
+    /// Views can observe this with `.onChange(of:)` to trigger settings reads.
+    var isReadyForSettingsQuery = false
     /// HR log interval reported by the ring (minutes). nil = not yet queried.
     var hrLogIntervalMinutes: Int?
     /// HR log enabled state reported by the ring. nil = not yet queried.
@@ -645,6 +661,7 @@ extension RingSessionManager: CBCentralManagerDelegate {
         characteristicsDiscovered = false
         confirmedNotifyCharacteristics.removeAll()
         syncOnConnectFired = false
+        isReadyForSettingsQuery = false
         uartRxCharacteristic = nil
         uartTxCharacteristic = nil
         colmiWriteCharacteristic = nil
@@ -779,7 +796,7 @@ extension RingSessionManager: CBPeripheralDelegate {
             syncOnConnectFired = true
             syncOnConnect()
             DispatchQueue.main.async { [weak self] in
-                self?.onReadyForSettingsQuery?()
+                self?.isReadyForSettingsQuery = true
             }
         }
     }
@@ -794,6 +811,10 @@ extension RingSessionManager: CBPeripheralDelegate {
 
         if characteristic.uuid == CBUUID(string: Self.colmiNotifyUUID) {
             appendToDebugLog(direction: .received, bytes: packet)
+            if gymWorkoutInProgress {
+                let hex = packet.map { String(format: "%02x", $0) }.joined(separator: " ")
+                tLog("[WorkoutRX-BigData] len=\(packet.count) hex=\(hex)")
+            }
             processBigDataChunk(packet)
             tLog(packet)
             return
@@ -801,8 +822,13 @@ extension RingSessionManager: CBPeripheralDelegate {
 
         if characteristic.uuid == CBUUID(string: Self.uartTxCharacteristicUUID) {
             appendToDebugLog(direction: .received, bytes: packet)
+            // During workouts, dump every raw packet for protocol analysis
+            if gymWorkoutInProgress {
+                let hex = packet.map { String(format: "%02x", $0) }.joined(separator: " ")
+                tLog("[WorkoutRX] opcode=0x\(String(format: "%02x", packet[0])) len=\(packet.count) hex=\(hex)")
+            }
         }
-        
+
         switch RingPacketDispatcher.dispatch(packet) {
 
         // MARK: Real-time HR (0x69)
@@ -896,8 +922,11 @@ extension RingSessionManager: CBPeripheralDelegate {
         case .hrvDataResponse(let pkt):         handleHRVDataResponse(packet: pkt)
         case .pressureDataResponse(let pkt):    handlePressureDataResponse(packet: pkt)
         case .activityDataResponse(let pkt):    handleActivityDataResponse(packet: pkt)
+        case .todaySportsResponse(let pkt):     handleTodaySportsResponse(packet: pkt)
         case .trackingSettingResponse(let pkt): trackingSettings.handleTrackingSettingResponse(packet: pkt)
         case .sportRealTimeResponse(let pkt):   handleSportRealTimeResponse(packet: pkt)
+        case .phoneSportResponse(let pkt):      handlePhoneSportResponse(packet: pkt)
+        case .phoneSportNotify(let pkt):        handlePhoneSportNotify(packet: pkt)
 
         // MARK: Misc
         case .timeSyncAck(let success):
@@ -1013,7 +1042,7 @@ extension RingSessionManager {
         case CMD.bigDataSleepId:
             if let sleepData = BigDataSleepParser.parseSleepPayload(payload) {
                 tLog("Big Data sleep received – \(sleepData.sleepDays) day(s)")
-                bigDataSleepCallback?(sleepData)
+                lastBigDataSleep = sleepData
                 dataDelegate?.ringDidReceiveSleepData(sleepData)
             } else {
                 tLog("Big Data sleep parse failed – payload length: \(payload.count)")
@@ -1163,6 +1192,7 @@ extension RingSessionManager {
         steps.append(.init(delay: metricsBase + spacing) { [weak self] in self?.syncBloodOxygen(dayOffset: 0) })
         steps.append(.init(delay: metricsBase + spacing * 2) { [weak self] in self?.syncPressureData(dayOffset: 0) })
         steps.append(.init(delay: metricsBase + spacing * 3) { [weak self] in self?.syncActivityData(dayOffset: 0) })
+        steps.append(.init(delay: metricsBase + spacing * 3.5) { [weak self] in self?.requestTodaySports() })
         steps.append(.init(delay: metricsBase + spacing * 4) { [weak self] in
             guard let self else { return }
             Task { @MainActor in await self.ensureHRLogSettings() }
@@ -1289,6 +1319,7 @@ extension RingSessionManager {
             .init(delay: 1.8) { [weak self] in self?.syncBloodOxygen(dayOffset: 0) },
             .init(delay: 2.4) { [weak self] in self?.syncPressureData(dayOffset: 0) },
             .init(delay: 3.0) { [weak self] in self?.syncActivityData(dayOffset: 0) },
+            .init(delay: 3.3) { [weak self] in self?.requestTodaySports() },
             // Re-check HR log settings — the ring firmware resets them on its own
             // midnight reboot, so we need to periodically re-apply.
             .init(delay: 3.6) { [weak self] in
@@ -1355,14 +1386,13 @@ extension RingSessionManager {
             dayOffset: lastSleepDayOffset
         )
         tLog("Sleep data received – date: \(year + 2000)-\(month)-\(day), time: \(time), qualities: \(sleepQualities)")
-        sleepDataCallback?(data)
+        lastSleepData = data
     }
 
     private func handleSleepResponse(packet: [UInt8]) {
         guard packet.count >= 2 else { return }
         let subType = packet[1]
         tLog("Sleep packet (legacy 0xBC) – subType: \(subType) (0x\(String(format: "%02x", subType))), full: \(packet)")
-        sleepPacketCallback?(packet)
         if subType == 255 {
             tLog("Sleep: no data (ring returned 0xFF subtype)")
         }
@@ -1492,7 +1522,65 @@ extension RingSessionManager {
         guard packet.count >= 2 else { return }
         dataDelegate?.ringDidReceiveActivityPacket(packet)
     }
-    
+
+    // MARK: - Today's Sports (CMD 0x48)
+
+    /// Request today's aggregated step/calorie/distance totals from the ring.
+    /// Unlike CMD 67 (15-minute slot history), this returns a single packet
+    /// with cumulative totals including a separate `runningSteps` field.
+    func requestTodaySports() {
+        do {
+            let packet = try makePacket(command: CMD.cmdGetStepToday, subData: [])
+            appendToDebugLog(direction: .sent, bytes: packet)
+            sendPacket(packet: packet)
+            tLog("[TodaySports] Requested today's aggregated totals (CMD 0x48)")
+        } catch {
+            tLog("[TodaySports] Failed to create packet: \(error)")
+        }
+    }
+
+    /// Parse the CMD 0x48 response.
+    ///
+    /// Layout matches Gadgetbridge `goalsSettings` / `liveActivity` encoding:
+    /// **24-bit big-endian** for steps/running/calories, **16-bit big-endian** for distance/duration.
+    ///
+    ///   [0]     = 0x48 (command)
+    ///   [1..3]  = totalSteps    (24-bit BE) — verified against CMD 0x43 slot sums
+    ///   [4..6]  = runningSteps  (24-bit BE) — 0 when no running detected
+    ///   [7..9]  = calories      (24-bit BE) — likely includes BMR; may need /10
+    ///   [10..12] = walkingDistance in meters (24-bit BE) — verified against CMD 0x43
+    ///   [13..14] = activityDuration in minutes (16-bit BE)
+    ///   [15]    = CRC
+    private func handleTodaySportsResponse(packet: [UInt8]) {
+        guard packet.count >= 15 else {
+            tLog("[TodaySports] Packet too short (\(packet.count)B)")
+            return
+        }
+
+        /// Read 24-bit big-endian unsigned at `offset` (3 bytes).
+        func readBE24(_ offset: Int) -> Int {
+            (Int(packet[offset]) << 16) | (Int(packet[offset + 1]) << 8) | Int(packet[offset + 2])
+        }
+        /// Read 16-bit big-endian unsigned at `offset` (2 bytes).
+        func readBE16(_ offset: Int) -> Int {
+            (Int(packet[offset]) << 8) | Int(packet[offset + 1])
+        }
+
+        let totalSteps      = readBE24(1)
+        let runningSteps    = readBE24(4)
+        let calories        = readBE24(7)
+        let walkingDistM    = readBE24(10)
+        let activityMinutes = readBE16(13)
+
+        let walkingDistKm   = Double(walkingDistM) / 1000.0
+        let hex = packet.map { String(format: "%02x", $0) }.joined(separator: " ")
+
+        // Expose running steps for UI
+        todayRunningSteps = runningSteps
+
+        tLog("[TodaySports] totalSteps=\(totalSteps) runningSteps=\(runningSteps) cal=\(calories) walkDist=\(walkingDistKm)km activityMin=\(activityMinutes)  raw=\(hex)")
+    }
+
     func sendPacket(packet: [UInt8]) {
         guard let uartRxCharacteristic, let peripheral else {
             tLog("Cannot send packet. Peripheral or characteristic not ready.")
@@ -1591,6 +1679,89 @@ extension RingSessionManager {
         }
 
         tLog("[SportRT] b4=\(b4) b10=\(b10) derivedHR=\(sportRTDerivedHR.map(String.init) ?? "nil") samples=\(sportRTBeatSamples.count) pkt=\(packet.prefix(11).map { String($0) }.joined(separator: ","))")
+    }
+}
+
+// MARK: - Phone Sport Mode (CMD 0x77 / 0x78)
+
+extension RingSessionManager {
+
+    /// Send a phone sport command: start, pause, resume, or end.
+    func sendPhoneSport(action: RingConstants.PhoneSportAction,
+                        type: RingConstants.PhoneSportType = .running) {
+        do {
+            let packet = try makePacket(command: CMD.cmdPhoneSport,
+                                        subData: [action.rawValue, type.rawValue])
+            appendToDebugLog(direction: .sent, bytes: packet)
+            sendPacket(packet: packet)
+            tLog("[PhoneSport] Sent action=\(action.rawValue) sportType=\(type.rawValue)")
+
+            if action == .start {
+                phoneSportActive = true
+                phoneSportSteps = 0
+                phoneSportDistanceM = 0
+                phoneSportHR = 0
+                phoneSportCalories = 0
+                phoneSportDurationSec = 0
+            } else if action == .end {
+                phoneSportActive = false
+            }
+        } catch {
+            tLog("[PhoneSport] Failed to create packet: \(error)")
+        }
+    }
+
+    /// Handle 0x77 response — ring echoes back the action code.
+    func handlePhoneSportResponse(packet: [UInt8]) {
+        guard packet.count >= 2 else { return }
+        let status = packet[1]
+        tLog("[PhoneSport] Response status=\(status) raw=\(packet.prefix(6).map { String(format: "%02x", $0) }.joined(separator: " "))")
+    }
+
+    /// Handle 0x78 notification — real-time sport telemetry from the ring.
+    ///
+    /// Layout (empirically verified from live packet captures, 2026-03-19):
+    ///   [0]      = 0x78 (command)
+    ///   [1]      = sportType echoed (e.g. 7=running) — NOT status
+    ///   [2]      = status flag (1=active, 3=ring-ended)
+    ///   [3]      = unknown (always 0)
+    ///   [4]      = elapsed seconds (uint8, 0-255; wraps for long sessions)
+    ///   [5]      = heart rate (BPM, uint8)
+    ///   [6..8]   = distance in meters (24-bit BE)
+    ///   [9..11]  = steps (24-bit BE)
+    ///   [12..14] = calories (24-bit BE, milli-kcal ÷1000 = kcal)
+    ///   [15]     = CRC
+    func handlePhoneSportNotify(packet: [UInt8]) {
+        guard packet.count >= 15 else {
+            tLog("[PhoneSportNotify] Packet too short (\(packet.count)B)")
+            return
+        }
+
+        func readBE24(_ offset: Int) -> Int {
+            (Int(packet[offset]) << 16) | (Int(packet[offset + 1]) << 8) | Int(packet[offset + 2])
+        }
+
+        let sportType = packet[1]
+        let status    = packet[2]
+        let elapsed   = Int(packet[4])
+        let hr        = Int(packet[5])
+        let distance  = readBE24(6)
+        let steps     = readBE24(9)
+        let calories  = readBE24(12)
+
+        phoneSportDurationSec = elapsed
+        phoneSportHR = hr
+        phoneSportSteps = steps
+        phoneSportDistanceM = distance
+        phoneSportCalories = calories / 1000  // milli-kcal → kcal
+
+        tLog("[PhoneSportNotify] type=\(sportType) status=\(status) elapsed=\(elapsed)s hr=\(hr) steps=\(steps) dist=\(distance)m cal=\(calories)mCal raw=\(packet.prefix(15).map { String(format: "%02x", $0) }.joined(separator: " "))")
+
+        // If status 3 — ring autonomously ended the session
+        if status == 3 {
+            tLog("[PhoneSportNotify] Ring ended sport session autonomously")
+            phoneSportActive = false
+        }
     }
 }
 
@@ -2023,6 +2194,7 @@ extension RingSessionManager {
                     .init(delay: 26) { [weak self] in self?.syncBloodOxygen(dayOffset: 0) },
                     .init(delay: 28) { [weak self] in self?.syncPressureData(dayOffset: 0) },
                     .init(delay: 30) { [weak self] in self?.syncActivityData(dayOffset: 0) },
+                    .init(delay: 31) { [weak self] in self?.requestTodaySports() },
                     // Re-check HR log settings — the ring firmware resets them
                     // on its own midnight reboot cycle.
                     .init(delay: 32) { [weak self] in

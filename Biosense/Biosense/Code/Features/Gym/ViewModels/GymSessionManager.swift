@@ -37,6 +37,11 @@ class GymSessionManager {
     var samples: [LiveHRSample] = []
     var peakBPM: Int = 0
 
+    /// Live steps from phone sport 0x78 notifications.
+    var sportSteps: Int = 0
+    /// Live distance (meters) from phone sport 0x78 notifications.
+    var sportDistanceM: Int = 0
+
     /// Zone time accumulators (seconds). Indexed by HRZone rawValue.
     var zoneTimeSeconds: [Double] = Array(repeating: 0, count: 6)
 
@@ -164,6 +169,11 @@ class GymSessionManager {
         // real-time HR stream for the workout.
         ringManager?.enterWorkoutMode()
 
+        // Start phone sport mode (0x77) — tells the ring to enter enhanced
+        // tracking, which may improve step counting accuracy and sends 0x78
+        // notifications with real-time steps, distance, HR, and calories.
+        ringManager?.sendPhoneSport(action: .start, type: .running)
+
         // Start timer loop
         timerTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -183,6 +193,7 @@ class GymSessionManager {
         guard workoutState == .active else { return }
         workoutState = .paused
         lastPauseStart = Date()
+        ringManager?.sendPhoneSport(action: .pause, type: .running)
 
         if hapticsEnabled {
             hapticLight.impactOccurred()
@@ -197,6 +208,7 @@ class GymSessionManager {
         lastPauseStart = nil
         workoutState = .active
         lastZoneTickTime = Date()
+        ringManager?.sendPhoneSport(action: .resume, type: .running)
 
         if hapticsEnabled {
             hapticLight.impactOccurred()
@@ -212,12 +224,36 @@ class GymSessionManager {
         continueTask = nil
         workoutState = .finished
 
+        // End phone sport mode (0x77) — must be sent before exitWorkoutMode
+        // so the ring finalizes sport data while still connected.
+        ringManager?.sendPhoneSport(action: .end, type: .running)
+
         // Exit workout mode — stops the real-time HR stream and returns
         // the sensor to idle so periodic spot-checks resume.
         ringManager?.exitWorkoutMode()
 
         // Clear activity tag so periodic sync resumes normally
         InfluxDBWriter.shared.activeTag = .none
+
+        // Re-sync today's activity data so the Home card reflects workout steps.
+        // Three-pass strategy:
+        //   1) 2 s after stop — picks up any already-finalized 15-min slots
+        //      + CMD 0x48 today's totals (includes running steps not in 15-min slots)
+        //   2) 5 min after stop — the ring's current 15-min slot should now be
+        //      finalized, so we get the full workout step count instead of a
+        //      partial read from a still-open slot.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            tLog("[Gym] Post-workout activity re-sync (immediate)")
+            self?.ringManager?.syncActivityData(dayOffset: 0)
+            // Also request today's aggregated totals — includes running steps
+            // that the 15-min slot history may not count.
+            self?.ringManager?.requestTodaySports()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 300.0) { [weak self] in
+            tLog("[Gym] Post-workout activity re-sync (delayed 5 min)")
+            self?.ringManager?.syncActivityData(dayOffset: 0)
+            self?.ringManager?.requestTodaySports()
+        }
 
         if hapticsEnabled {
             hapticNotification.notificationOccurred(.warning)
@@ -226,8 +262,14 @@ class GymSessionManager {
         guard let start = workoutStartTime else { return nil }
         let end = Date()
 
+        // Capture final sport steps from 0x78 before clearing
+        let finalSportSteps = sportSteps
+        let finalSportDistanceM = sportDistanceM
+
         let validSamples = samples.filter { $0.bpm > 0 }
         let avgBPM = validSamples.isEmpty ? 0 : validSamples.reduce(0) { $0 + $1.bpm } / validSamples.count
+
+        tLog("[Gym] Workout finished — sportSteps=\(finalSportSteps) sportDistanceM=\(finalSportDistanceM)")
 
         return CompletedWorkout(
             startTime: start,
@@ -237,7 +279,9 @@ class GymSessionManager {
             avgBPM: avgBPM,
             peakBPM: peakBPM,
             zoneTimeSeconds: zoneTimeSeconds,
-            samples: samples
+            samples: samples,
+            sportSteps: finalSportSteps,
+            sportDistanceM: finalSportDistanceM
         )
     }
 
@@ -391,6 +435,12 @@ class GymSessionManager {
             ringManager?.sendRealtimeHRContinue()
             lastContinueKeepAliveTime = now
         }
+
+        // ── Phone sport data (0x78 notifications) ──────────────────
+        if let rm = ringManager, rm.phoneSportActive {
+            sportSteps = rm.phoneSportSteps
+            sportDistanceM = rm.phoneSportDistanceM
+        }
     }
 
     // MARK: - Haptics
@@ -450,6 +500,8 @@ class GymSessionManager {
         elapsedSeconds = 0
         samples = []
         peakBPM = 0
+        sportSteps = 0
+        sportDistanceM = 0
         zoneTimeSeconds = Array(repeating: 0, count: 6)
         pauseAccumulated = 0
         lastPauseStart = nil
@@ -473,6 +525,10 @@ struct CompletedWorkout {
     let peakBPM: Int
     let zoneTimeSeconds: [Double]
     let samples: [LiveHRSample]
+    /// Steps reported by phone sport mode (0x78 notifications).
+    let sportSteps: Int
+    /// Distance in meters from phone sport mode.
+    let sportDistanceM: Int
 
     func toStoredSession() -> StoredGymSession {
         let storedSamples = samples.map { GymHRSample(timestamp: $0.timestamp, bpm: $0.bpm) }
@@ -483,6 +539,8 @@ struct CompletedWorkout {
             maxHR: maxHR,
             avgBPM: avgBPM,
             peakBPM: peakBPM,
+            sportRTSteps: sportSteps,
+            sportDistanceM: sportDistanceM,
             zoneTimeSeconds: zoneTimeSeconds,
             samples: storedSamples
         )

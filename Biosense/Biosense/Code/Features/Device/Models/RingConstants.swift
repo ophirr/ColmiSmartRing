@@ -17,6 +17,9 @@ enum RingConstants {
     static let cmdSetDeviceTime: UInt8       = 0x01
     static let cmdBattery: UInt8             = 0x03
     static let cmdBlinkTwice: UInt8          = 0x10  // 16
+    /// Packet size negotiation (Gadgetbridge: CMD_PACKET_SIZE).
+    /// Ring sends this on connect; safe to ignore.
+    static let cmdPacketSize: UInt8          = 0x2F  // 47
     static let cmdReadHeartRate: UInt8       = 0x15  // 21
     static let cmdHRTimingMonitor: UInt8     = 0x16  // 22 — HR log interval + enable
     static let cmdHeartRateSetting: UInt8    = 22    // Settings protocol: HR toggle
@@ -26,13 +29,22 @@ enum RingConstants {
     static let cmdReadPressureData: UInt8    = 55    // Historical stress data
     static let cmdHRVSetting: UInt8          = 56    // Settings protocol: HRV toggle
     static let cmdReadHRVData: UInt8         = 57    // Historical HRV data
-    static let cmdReadActivityData: UInt8    = 67    // Steps/calories/distance
+    static let cmdReadActivityData: UInt8    = 67    // Steps/calories/distance (15-min slots)
     static let cmdSleepData: UInt8           = 68
+    /// Today's aggregated sports totals: totalSteps, runningSteps, calories,
+    /// walkingDistance, activityDuration.  24-bit big-endian for values, 16-bit BE for duration.
+    static let cmdGetStepToday: UInt8        = 0x48  // 72
     static let cmdSyncSleepLegacy: UInt8     = 0xBC  // 188
     static let cmdStartRealTime: UInt8       = 0x69  // 105
     static let cmdStopRealTime: UInt8        = 0x6A  // 106
     static let cmdPathwayAStop: UInt8        = 0x6B  // 107
     static let cmdSportRealTime: UInt8       = 0x73  // 115
+    /// Phone-initiated sport mode: tells ring to enter enhanced tracking.
+    /// Packet: [0x77, action, sportType, ...zeros..., crc]
+    static let cmdPhoneSport: UInt8          = 0x77  // 119
+    /// Ring → phone notifications during active phone sport session.
+    /// Contains real-time steps, HR, distance, calories, duration.
+    static let cmdPhoneSportNotify: UInt8    = 0x78  // 120
     /// Ack byte for CMD_REAL_TIME_HEART_RATE (0x1E + 0x80 = 0x9E).
     /// The ring echoes command | 0x80 as acknowledgement.
     static let cmdRealTimeHeartRateAck: UInt8 = 0x9E  // 158
@@ -174,4 +186,23 @@ enum RingConstants {
     static let sleepQuerySlotCount: UInt8  = 15
     /// Sub-data byte 3: max entries per response page (0x5F = 95).
     static let sleepQueryMaxEntries: UInt8 = 95
+
+    // MARK: - Phone Sport Mode (CMD 0x77 / 0x78)
+
+    /// Action codes for CMD_PHONE_SPORT (byte 1).
+    enum PhoneSportAction: UInt8 {
+        case start  = 1
+        case pause  = 2
+        case resume = 3
+        case end    = 4
+    }
+
+    /// Sport type IDs (byte 2). Only Walk/Run/Hike report steps+distance.
+    enum PhoneSportType: UInt8 {
+        case walking  = 4
+        case running  = 7
+        case hiking   = 8
+        case cycling  = 9
+        case other    = 10
+    }
 }

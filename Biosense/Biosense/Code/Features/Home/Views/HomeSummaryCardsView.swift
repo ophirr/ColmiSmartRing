@@ -24,6 +24,12 @@ struct HomeSummaryCardsView: View {
     var distanceKm: Double
     var calories: Int
     var activityLabel: String
+    /// Running steps from CMD 0x48 (separate from walking steps in 0x43).
+    var runningSteps: Int = 0
+    /// Number of completed gym workouts today (0 = no workouts).
+    var gymWorkoutCount: Int = 0
+    /// Total gym workout duration today in minutes.
+    var gymDurationMinutes: Int = 0
     /// Latest SpO2 reading (nil if no data).
     var spo2Percent: Int?
     /// Latest temperature reading in Celsius (nil if no data).
@@ -55,7 +61,30 @@ struct HomeSummaryCardsView: View {
                 metricCell(value: "\(calories)", unit: L10n.HomeSummary.calories, color: .red)
             }
             .frame(maxWidth: .infinity)
-            if !activityLabel.isEmpty {
+            if runningSteps > 0 {
+                HStack(spacing: 4) {
+                    Image(systemName: "figure.run")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    Text("\(runningSteps) running steps")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+            }
+            if gymWorkoutCount > 0 {
+                HStack(spacing: 4) {
+                    Image(systemName: "flame.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    Text(gymWorkoutCount == 1
+                         ? "\(gymDurationMinutes) min workout"
+                         : "\(gymWorkoutCount) workouts · \(gymDurationMinutes) min")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+            } else if !activityLabel.isEmpty {
                 Text(activityLabel)
                     .font(.caption)
                     .foregroundStyle(.tertiary)

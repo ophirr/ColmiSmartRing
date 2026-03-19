@@ -88,7 +88,8 @@ struct GymScreenView: View {
                 Button("Cancel", role: .cancel) { }
             } message: {
                 if let w = completedWorkout {
-                    Text("\(w.samples.count) HR samples over \(formatDuration(w.durationSeconds))\nAvg: \(w.avgBPM) BPM  Peak: \(w.peakBPM) BPM")
+                    let stepsLine = w.sportSteps > 0 ? "\nSteps: \(w.sportSteps)  Dist: \(String(format: "%.2f", Double(w.sportDistanceM) / 1000.0)) km" : ""
+                    Text("\(w.samples.count) HR samples over \(formatDuration(w.durationSeconds))\nAvg: \(w.avgBPM) BPM  Peak: \(w.peakBPM) BPM\(stepsLine)")
                 }
             }
         }
@@ -242,9 +243,16 @@ struct GymScreenView: View {
                 .padding(.top, 12)
 
             // Stats row
-            HStack(spacing: 40) {
+            HStack(spacing: 32) {
                 StatPill(title: "AVG", value: "\(gymManager.avgBPM)")
                 StatPill(title: "PEAK", value: "\(gymManager.peakBPM)")
+                if gymManager.sportSteps > 0 {
+                    StatPill(title: "STEPS", value: "\(gymManager.sportSteps)")
+                }
+                if gymManager.sportDistanceM > 0 {
+                    let km = String(format: "%.2f", Double(gymManager.sportDistanceM) / 1000.0)
+                    StatPill(title: "KM", value: km)
+                }
             }
             .padding(.top, 12)
 

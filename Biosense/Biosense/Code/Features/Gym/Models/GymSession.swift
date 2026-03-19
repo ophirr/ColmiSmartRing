@@ -40,6 +40,14 @@ final class StoredGymSession {
     /// Optional user-provided label (e.g. "Leg Day", "HIIT").
     var label: String?
 
+    /// Steps reported by phone sport mode (0x78 notifications).
+    /// Replaces the old sportRTSteps hypothesis — these come from the ring's
+    /// accelerometer in enhanced sport tracking mode (CMD 0x77).
+    var sportRTSteps: Int?
+
+    /// Distance in meters from phone sport mode (0x78 notifications).
+    var sportDistanceM: Int?
+
     /// Time spent in each zone (seconds). Indexed by HRZone rawValue (0-5).
     var zoneTimeSeconds: [Double]
 
@@ -54,6 +62,8 @@ final class StoredGymSession {
         avgBPM: Int,
         peakBPM: Int,
         label: String? = nil,
+        sportRTSteps: Int? = nil,
+        sportDistanceM: Int? = nil,
         zoneTimeSeconds: [Double] = Array(repeating: 0, count: 6),
         samples: [GymHRSample] = []
     ) {
@@ -64,11 +74,22 @@ final class StoredGymSession {
         self.avgBPM = avgBPM
         self.peakBPM = peakBPM
         self.label = label
+        self.sportRTSteps = sportRTSteps
+        self.sportDistanceM = sportDistanceM
         self.zoneTimeSeconds = zoneTimeSeconds
         self.samples = samples
         for s in samples {
             s.session = self
         }
+    }
+
+    /// Estimated active calories burned, based on average HR and duration.
+    /// Uses the same formula as AppleHealthGymWriter: ~6 cal/min for strength
+    /// training, scaled by avgBPM relative to 130 bpm baseline.
+    var estimatedCalories: Int {
+        let durationMinutes = durationSeconds / 60.0
+        let calMultiplier = avgBPM > 0 ? Double(avgBPM) / 130.0 : 1.0
+        return Int((durationMinutes * 6.0 * calMultiplier).rounded())
     }
 
     /// Formatted duration string "MM:SS" or "H:MM:SS".

@@ -194,8 +194,14 @@ struct GymSessionDetailView: View {
                 statCard(title: "Duration", value: session.formattedDuration, icon: "timer")
                 statCard(title: "Avg HR", value: "\(session.avgBPM)", icon: "heart.fill")
                 statCard(title: "Peak HR", value: "\(session.peakBPM)", icon: "arrow.up.heart.fill")
+                statCard(title: "Calories", value: "\(session.estimatedCalories)", icon: "flame.fill")
                 statCard(title: "Samples", value: "\(session.samples.count)", icon: "waveform.path")
-                statCard(title: "Max HR", value: "\(session.maxHR)", icon: "gauge.with.dots.needle.67percent")
+                if let steps = session.sportRTSteps, steps > 0 {
+                    statCard(title: "Steps", value: "\(steps)", icon: "figure.run")
+                }
+                if let distM = session.sportDistanceM, distM > 0 {
+                    statCard(title: "Distance", value: String(format: "%.2f km", Double(distM) / 1000.0), icon: "point.topleft.down.to.point.bottomright.curvepath")
+                }
             }
         }
     }

@@ -83,10 +83,43 @@ enum SwiftDataMigrations {
         UserDefaults.standard.set(true, forKey: key)
     }
 
+    /// Halve all StoredActivitySample steps/calories/distance values.
+    ///
+    /// A bug in `flushActivityBatch()` caused duplicate (date, hour, minute)
+    /// slots to be summed in the hourly aggregation — producing exactly 2×
+    /// the real value. The deduplication fix prevents future doubling, but
+    /// existing rows are already inflated. This one-time migration divides
+    /// every sample by 2 so the stored data matches what the ring reported.
+    static func halveDoubledActivitySamples(context: ModelContext) {
+        let key = AppSettings.Migration.activityStepHalve
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+
+        do {
+            let all = try context.fetch(FetchDescriptor<StoredActivitySample>())
+            guard !all.isEmpty else {
+                UserDefaults.standard.set(true, forKey: key)
+                return
+            }
+            var modified = 0
+            for sample in all {
+                sample.steps = sample.steps / 2
+                sample.calories = sample.calories / 2
+                sample.distanceKm = sample.distanceKm / 2.0
+                modified += 1
+            }
+            try context.save()
+            tLog("[ActivityMigration] Halved \(modified) doubled activity samples")
+        } catch {
+            tLog("[ActivityMigration] Halve migration failed: \(error)")
+        }
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
     /// Run all pending one-time migrations.
     static func runAll(context: ModelContext) {
         purgeStaleActivitySamples(context: context)
         backfillSleepNightDates(context: context)
         purgeStaleHeartRateLogs(context: context)
+        halveDoubledActivitySamples(context: context)
     }
 }

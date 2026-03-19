@@ -57,8 +57,14 @@ enum RingPacketResult {
     case hrvDataResponse(packet: [UInt8])
     case pressureDataResponse(packet: [UInt8])
     case activityDataResponse(packet: [UInt8])
+    /// Today's aggregated step totals (CMD 0x48).
+    case todaySportsResponse(packet: [UInt8])
     case trackingSettingResponse(packet: [UInt8])
     case sportRealTimeResponse(packet: [UInt8])
+    /// Phone sport mode ack (CMD 0x77) — ring echoes back the action.
+    case phoneSportResponse(packet: [UInt8])
+    /// Phone sport notification (CMD 0x78) — real-time steps/HR/dist/cal during sport session.
+    case phoneSportNotify(packet: [UInt8])
 
     // MARK: - Misc
 
@@ -101,10 +107,16 @@ enum RingPacketDispatcher {
             return .pressureDataResponse(packet: packet)
         case CMD.cmdReadActivityData:
             return .activityDataResponse(packet: packet)
+        case CMD.cmdGetStepToday:
+            return .todaySportsResponse(packet: packet)
         case CMD.cmdHRVSetting, CMD.cmdHeartRateSetting, CMD.cmdBloodOxygen, CMD.cmdPressureSetting:
             return .trackingSettingResponse(packet: packet)
         case CMD.cmdSportRealTime:
             return .sportRealTimeResponse(packet: packet)
+        case CMD.cmdPhoneSport:
+            return .phoneSportResponse(packet: packet)
+        case CMD.cmdPhoneSportNotify:
+            return .phoneSportNotify(packet: packet)
 
         // MARK: Real-time readings (0x69)
         case CMD.cmdStartRealTime:
@@ -125,6 +137,8 @@ enum RingPacketDispatcher {
             return .counterX
         case CMD.cmdRealTimeHeartRateAck:
             return .ack
+        case CMD.cmdPacketSize:
+            return .ack  // Packet size negotiation — safe to ignore
 
         default:
             return .unhandled(opcode: packet[0], packet: packet)

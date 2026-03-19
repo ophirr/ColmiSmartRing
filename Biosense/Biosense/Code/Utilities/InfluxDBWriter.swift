@@ -225,23 +225,31 @@ final class InfluxDBWriter {
     /// Tag fragment for line protocol, e.g. ",activity=meditating"
     private var tag: String { activeTag.lineProtocolSuffix }
 
-    func writeHeartRates(_ readings: [(bpm: Int, time: Date)]) {
+    /// Write heart rate data.  Pass `tagged: false` for historical ring log
+    /// data so it doesn't inherit the live activity tag (which would create
+    /// duplicate InfluxDB series with misleading labels).
+    func writeHeartRates(_ readings: [(bpm: Int, time: Date)], tagged: Bool = true) {
+        let t = tagged ? tag : ""
         let lines = readings.map { reading in
-            "heart_rate,source=colmi_r02\(tag) bpm=\(reading.bpm)i \(epochSeconds(reading.time))"
+            "heart_rate,source=colmi_r02\(t) bpm=\(reading.bpm)i \(epochSeconds(reading.time))"
         }
         write(lines)
     }
 
+    /// Write historical HRV data from ring log.  Never tagged — always historical.
     func writeHRV(value: Double, time: Date) {
-        write("hrv,source=colmi_r02\(tag) ms=\(value) \(epochSeconds(time))")
+        write("hrv,source=colmi_r02 ms=\(value) \(epochSeconds(time))")
     }
 
+    /// Write historical stress data from ring log.  Never tagged — always historical.
     func writeStress(value: Double, time: Date) {
-        write("stress,source=colmi_r02\(tag) level=\(value) \(epochSeconds(time))")
+        write("stress,source=colmi_r02 level=\(value) \(epochSeconds(time))")
     }
 
-    func writeSpO2(value: Double, time: Date) {
-        write("spo2,source=colmi_r02\(tag) percent=\(value) \(epochSeconds(time))")
+    /// Write SpO2 data.  Pass `tagged: false` for historical ring log data.
+    func writeSpO2(value: Double, time: Date, tagged: Bool = true) {
+        let t = tagged ? tag : ""
+        write("spo2,source=colmi_r02\(t) percent=\(value) \(epochSeconds(time))")
     }
 
     func writeTemperature(celsius: Double, time: Date) {
@@ -249,12 +257,17 @@ final class InfluxDBWriter {
         write("body_temp,source=colmi_r02\(tag) celsius=\(rounded) \(epochSeconds(time))")
     }
 
+    /// Write historical activity data from the ring's step counter.
+    /// Does NOT apply the live activity tag — this is hourly-aggregated
+    /// historical data, not real-time.  Tagging it would create duplicate
+    /// InfluxDB series with misleading labels.
     func writeActivity(steps: Int, calories: Int, distanceKm: Double, time: Date) {
-        write("activity,source=colmi_r02\(tag) steps=\(steps)i,calories=\(calories)i,distance_km=\(distanceKm) \(epochSeconds(time))")
+        write("activity,source=colmi_r02 steps=\(steps)i,calories=\(calories)i,distance_km=\(distanceKm) \(epochSeconds(time))")
     }
 
+    /// Write historical sleep data. No activity tag — same rationale as writeActivity.
     func writeSleep(stage: String, durationMinutes: Int, time: Date) {
-        write("sleep,source=colmi_r02\(tag),stage=\(stage) duration_min=\(durationMinutes)i \(epochSeconds(time))")
+        write("sleep,source=colmi_r02,stage=\(stage) duration_min=\(durationMinutes)i \(epochSeconds(time))")
     }
 
     func writeGymHR(bpm: Int, sessionID: String, time: Date) {

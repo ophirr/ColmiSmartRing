@@ -7,6 +7,7 @@ struct HomeScreenView: View {
     @Query(sort: \StoredSleepDay.syncDate, order: .reverse) private var storedSleepDays: [StoredSleepDay]
     @Query(sort: \StoredHeartRateLog.timestamp, order: .reverse) private var storedHeartRateLogs: [StoredHeartRateLog]
     @Query(sort: \StoredActivitySample.timestamp, order: .reverse) private var storedActivitySamples: [StoredActivitySample]
+    @Query(sort: \StoredGymSession.startTime, order: .reverse) private var storedGymSessions: [StoredGymSession]
 
     private var latestSleepDurationMinutes: Int? {
         storedSleepDays.first.map { $0.toSleepDay().totalDurationMinutes }
@@ -22,11 +23,26 @@ struct HomeScreenView: View {
 
     private var latestActivity: (steps: Int, distanceKm: Double, calories: Int, label: String)? {
         let todaySamples = storedActivitySamples.filter { Calendar.current.isDateInToday($0.timestamp) }
-        guard !todaySamples.isEmpty else { return nil }
+        let todayGymSessions = storedGymSessions.filter { Calendar.current.isDateInToday($0.startTime) }
+        guard !todaySamples.isEmpty || !todayGymSessions.isEmpty else { return nil }
         let totalSteps = todaySamples.reduce(0) { $0 + $1.steps }
         let totalDistanceKm = todaySamples.reduce(0.0) { $0 + $1.distanceKm }
-        let totalCalories = todaySamples.reduce(0) { $0 + $1.calories }
+        let ringCalories = todaySamples.reduce(0) { $0 + $1.calories }
+        // Add estimated gym calories (HR-based) to the ring's step-derived calories.
+        let gymCalories = todayGymSessions.reduce(0) { $0 + $1.estimatedCalories }
+        let totalCalories = ringCalories + gymCalories
         return (totalSteps, totalDistanceKm, totalCalories, "")
+    }
+
+    /// Number of completed gym workouts today (for the activity card badge).
+    private var todayGymWorkoutCount: Int {
+        storedGymSessions.filter { Calendar.current.isDateInToday($0.startTime) }.count
+    }
+
+    /// Total gym workout duration today in minutes.
+    private var todayGymDurationMinutes: Int {
+        let todaySessions = storedGymSessions.filter { Calendar.current.isDateInToday($0.startTime) }
+        return Int(todaySessions.reduce(0.0) { $0 + $1.durationSeconds } / 60.0)
     }
 
     private var todaySleepRecord: StoredSleepDay? {
@@ -57,6 +73,9 @@ struct HomeScreenView: View {
                         distanceKm: latestActivity?.distanceKm ?? 0,
                         calories: latestActivity?.calories ?? 0,
                         activityLabel: latestActivity?.label ?? "",
+                        runningSteps: ringSessionManager.todayRunningSteps,
+                        gymWorkoutCount: todayGymWorkoutCount,
+                        gymDurationMinutes: todayGymDurationMinutes,
                         spo2Percent: ringSessionManager.realTimeBloodOxygenPercent,
                         temperatureCelsius: ringSessionManager.realTimeTemperatureCelsius
                     )
@@ -86,6 +105,7 @@ struct HomeScreenView: View {
             .onAppear {
                 if ringSessionManager.peripheralConnected {
                     ringSessionManager.syncActivityData(dayOffset: 0)
+                    ringSessionManager.requestTodaySports()
                 }
             }
         }
@@ -96,6 +116,7 @@ struct HomeScreenView: View {
         guard ringSessionManager.peripheralConnected else { return }
         ringSessionManager.getHeartRateLog(dayOffset: 0) { _ in }
         ringSessionManager.syncActivityData(dayOffset: 0)
+        ringSessionManager.requestTodaySports()
         ringSessionManager.syncHRVData(dayOffset: 0)
         ringSessionManager.syncBloodOxygen(dayOffset: 0)
         ringSessionManager.syncPressureData(dayOffset: 0)
@@ -147,7 +168,9 @@ struct HomeScreenView: View {
                 StoredSleepDay.self,
                 StoredSleepPeriod.self,
                 StoredHeartRateLog.self,
-                StoredActivitySample.self
+                StoredActivitySample.self,
+                StoredGymSession.self,
+                GymHRSample.self
             ],
             inMemory: true
         )

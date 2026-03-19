@@ -52,5 +52,6 @@ enum AppSettings {
         static let activityParserV4 = "activityParserV4Migrated"
         static let sleepNightDateBackfill = "sleepNightDateBackfilled"
         static let hrLogUTCPurgeV4 = "hrLogUTCMapFixPurgeV4"
+        static let activityStepHalve = "activityStepHalveV1"
     }
 }
