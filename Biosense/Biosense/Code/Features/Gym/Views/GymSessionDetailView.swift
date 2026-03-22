@@ -115,6 +115,17 @@ struct GymSessionDetailView: View {
                         )
                         .interpolationMethod(.catmullRom)
                     }
+
+                    // Yellow dots for cadence-filtered readings
+                    ForEach(sortedSamples.filter { $0.cadenceFiltered == true }) { sample in
+                        let elapsed = sample.timestamp.timeIntervalSince(session.startTime) / 60.0
+                        PointMark(
+                            x: .value("Time (min)", elapsed),
+                            y: .value("BPM", sample.bpm)
+                        )
+                        .foregroundStyle(.yellow.opacity(0.6))
+                        .symbolSize(20)
+                    }
                 }
                 .chartYAxis {
                     AxisMarks(position: .leading)
@@ -256,12 +267,12 @@ struct GymSessionDetailView: View {
     }
 
     private func exportCSV() {
-        var csv = "timestamp,elapsed_seconds,bpm,zone\n"
+        var csv = "timestamp,elapsed_seconds,bpm,zone,cadence_filtered\n"
         let formatter = ISO8601DateFormatter()
         for sample in sortedSamples {
             let elapsed = sample.timestamp.timeIntervalSince(session.startTime)
             let zone = zoneConfig.zone(for: sample.bpm)
-            csv += "\(formatter.string(from: sample.timestamp)),\(String(format: "%.1f", elapsed)),\(sample.bpm),\(zone.label)\n"
+            csv += "\(formatter.string(from: sample.timestamp)),\(String(format: "%.1f", elapsed)),\(sample.bpm),\(zone.label),\(sample.cadenceFiltered ?? false)\n"
         }
 
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(

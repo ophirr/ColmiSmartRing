@@ -199,6 +199,19 @@ struct GymScreenView: View {
                     Text("BPM")
                         .font(.title3.weight(.medium))
                         .foregroundStyle(.primary.opacity(0.6))
+
+                    if gymManager.isCadenceFiltered {
+                        HStack(spacing: 4) {
+                            Image(systemName: "waveform.path.ecg")
+                                .font(.caption2)
+                            Text("CORRECTED")
+                                .font(.system(size: 10, weight: .bold))
+                        }
+                        .foregroundStyle(.yellow.opacity(0.7))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(.yellow.opacity(0.15)))
+                    }
                 }
 
                 // Zone label
@@ -252,6 +265,9 @@ struct GymScreenView: View {
                 if gymManager.sportDistanceM > 0 {
                     let km = String(format: "%.2f", Double(gymManager.sportDistanceM) / 1000.0)
                     StatPill(title: "KM", value: km)
+                }
+                if gymManager.currentCadenceSPM > 0 {
+                    StatPill(title: "SPM", value: "\(gymManager.currentCadenceSPM)")
                 }
             }
             .padding(.top, 12)

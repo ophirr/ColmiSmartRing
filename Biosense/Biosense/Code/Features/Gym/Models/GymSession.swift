@@ -14,12 +14,16 @@ import SwiftData
 final class GymHRSample {
     var timestamp: Date
     var bpm: Int
+    /// Whether this reading was corrected by the cadence rejection filter.
+    /// Optional so SwiftData lightweight migration works (existing rows get nil).
+    var cadenceFiltered: Bool?
 
     var session: StoredGymSession?
 
-    init(timestamp: Date, bpm: Int) {
+    init(timestamp: Date, bpm: Int, cadenceFiltered: Bool = false) {
         self.timestamp = timestamp
         self.bpm = bpm
+        self.cadenceFiltered = cadenceFiltered
     }
 }
 

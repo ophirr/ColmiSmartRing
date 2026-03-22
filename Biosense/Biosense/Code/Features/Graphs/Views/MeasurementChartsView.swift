@@ -16,6 +16,27 @@ extension View {
     @ViewBuilder
     func timeRangeXAxis(_ timeRange: TimeRange, domain: ClosedRange<Date>? = nil) -> some View {
         switch timeRange {
+        case .hour1:
+            self.optionalXDomain(domain).chartXAxis {
+                AxisMarks(values: .stride(by: .minute, count: 10)) { _ in
+                    AxisValueLabel(format: .dateTime.hour().minute())
+                    AxisGridLine()
+                }
+            }
+        case .hour6:
+            self.optionalXDomain(domain).chartXAxis {
+                AxisMarks(values: .stride(by: .hour, count: 1)) { _ in
+                    AxisValueLabel(format: .dateTime.hour())
+                    AxisGridLine()
+                }
+            }
+        case .hour12:
+            self.optionalXDomain(domain).chartXAxis {
+                AxisMarks(values: .stride(by: .hour, count: 2)) { _ in
+                    AxisValueLabel(format: .dateTime.hour())
+                    AxisGridLine()
+                }
+            }
         case .day:
             self.optionalXDomain(domain).chartXAxis {
                 AxisMarks(values: .stride(by: .hour, count: 4)) { _ in
@@ -77,7 +98,7 @@ struct ActivityBarChartView: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
             Chart(data) { point in
-                if timeRange == .day {
+                if timeRange.isSubDay {
                     BarMark(
                         x: .value("Time", point.time),
                         y: .value(yLabel, point.value)
@@ -297,7 +318,7 @@ struct BloodOxygenChartView: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
             Chart(data) { point in
-                if timeRange == .day {
+                if timeRange.isSubDay {
                     LineMark(
                         x: .value("Time", point.time),
                         y: .value(unit, point.value)
@@ -349,7 +370,7 @@ struct StressChartView: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
             Chart(data) { point in
-                if timeRange == .day {
+                if timeRange.isSubDay {
                     LineMark(
                         x: .value("Time", point.time),
                         y: .value("Stress", point.value)

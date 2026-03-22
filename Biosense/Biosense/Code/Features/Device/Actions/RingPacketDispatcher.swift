@@ -66,6 +66,17 @@ enum RingPacketResult {
     /// Phone sport notification (CMD 0x78) — real-time steps/HR/dist/cal during sport session.
     case phoneSportNotify(packet: [UInt8])
 
+    // MARK: - Raw sensor streaming (0xA1)
+
+    /// Raw PPG waveform sample.
+    case rawPPG(raw: Int, max: Int, min: Int, diff: Int, timestamp: Date)
+    /// Raw 3-axis accelerometer sample.
+    case rawAccelerometer(x: Int, y: Int, z: Int, timestamp: Date)
+    /// Raw SpO2 sample.
+    case rawSpO2(value: Int, max: Int, min: Int, diff: Int, timestamp: Date)
+    /// 0xA1 ack (enable/disable confirmation).
+    case rawSensorAck
+
     // MARK: - Misc
 
     case timeSyncAck(success: Bool)
@@ -132,6 +143,10 @@ enum RingPacketDispatcher {
         case CMD.cmdPathwayAStop:
             return .spo2StopNotification(packet: packet)
 
+        // MARK: Raw sensor streaming (0xA1)
+        case CMD.cmdRawSensor:
+            return parseRawSensor(packet)
+
         // MARK: Acks and special
         case Counter.shared.CMD_X:
             return .counterX
@@ -195,6 +210,50 @@ enum RingPacketDispatcher {
             return .rtHR(bpm: Int(hrValue), timestamp: now)
         } else {
             return .rtHROutOfRange(value: hrValue)
+        }
+    }
+
+    /// Parse a 0xA1 raw sensor packet.
+    /// Layout varies by subtype (byte[1]):
+    ///   0x01 SpO2:  [2..3]=value(BE16), [5]=max, [7]=min, [9]=diff
+    ///   0x02 PPG:   [2..3]=raw(BE16), [4..5]=max(BE16), [6..7]=min(BE16), [8..9]=diff(BE16)
+    ///   0x03 Accel:  [6..7]=X(12-bit signed), [2..3]=Y(12-bit signed), [4..5]=Z(12-bit signed)
+    private static func parseRawSensor(_ packet: [UInt8]) -> RingPacketResult {
+        guard packet.count >= 10 else {
+            // Short 0xA1 packets are enable/disable acks
+            return .rawSensorAck
+        }
+        guard let sensorType = RingConstants.RawSensorType(rawValue: packet[1]) else {
+            return .rawSensorAck
+        }
+        let now = Date()
+
+        switch sensorType {
+        case .ppg:
+            let raw  = Int(packet[2]) << 8 | Int(packet[3])
+            let max  = Int(packet[4]) << 8 | Int(packet[5])
+            let min  = Int(packet[6]) << 8 | Int(packet[7])
+            let diff = Int(packet[8]) << 8 | Int(packet[9])
+            return .rawPPG(raw: raw, max: max, min: min, diff: diff, timestamp: now)
+
+        case .accelerometer:
+            // 12-bit signed values with sign extension at bit 11
+            func signed12(_ hi: UInt8, _ lo: UInt8) -> Int {
+                var val = (Int(hi) << 8 | Int(lo)) & 0x0FFF
+                if val & 0x0800 != 0 { val -= 0x1000 }  // sign extend
+                return val
+            }
+            let y = signed12(packet[2], packet[3])
+            let z = signed12(packet[4], packet[5])
+            let x = signed12(packet[6], packet[7])
+            return .rawAccelerometer(x: x, y: y, z: z, timestamp: now)
+
+        case .spo2:
+            let value = Int(packet[2]) << 8 | Int(packet[3])
+            let max   = Int(packet[5])
+            let min   = Int(packet[7])
+            let diff  = Int(packet[9])
+            return .rawSpO2(value: value, max: max, min: min, diff: diff, timestamp: now)
         }
     }
 

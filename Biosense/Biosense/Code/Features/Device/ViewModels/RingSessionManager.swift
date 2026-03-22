@@ -86,6 +86,23 @@ class RingSessionManager: NSObject {
     /// Running steps from CMD 0x48 — exposed for UI display.
     var todayRunningSteps: Int = 0
 
+    // MARK: Raw Sensor Streaming (0xA1)
+
+    /// Whether raw sensor streaming (PPG + accel + SpO2) is currently active.
+    private(set) var rawSensorStreamActive = false
+    /// Latest raw PPG sample (raw waveform value).
+    var rawPPGValue: Int = 0
+    /// Latest raw accelerometer sample.
+    var rawAccelX: Int = 0
+    var rawAccelY: Int = 0
+    var rawAccelZ: Int = 0
+    /// Counters for raw sensor packets received (for debug display / sample rate calc).
+    var rawPPGCount: Int = 0
+    var rawAccelCount: Int = 0
+    var rawSpO2Count: Int = 0
+    /// Timestamp of the first raw packet in the current streaming session.
+    private var rawStreamStartTime: Date?
+
     /// Latest real-time blood oxygen reading in percent.
     var realTimeBloodOxygenPercent: Int?
     /// Timer that sends continue keepalives to keep the SpO2 measurement alive.
@@ -124,6 +141,11 @@ class RingSessionManager: NSObject {
             }
         }
     }
+
+    /// Firmware revision string read from Device Info Service (0x180A), e.g. "R02_3.00.06".
+    var firmwareRevision: String?
+    /// Hardware revision string read from Device Info Service.
+    var hardwareRevision: String?
 
     /// Time zone used when building day-based request timestamps (e.g. heart-rate history).
     var preferredDataTimeZoneIdentifier: String {
@@ -207,6 +229,8 @@ class RingSessionManager: NSObject {
     private static let uartRxCharacteristicUUID = SmartRingBLE.nordicUARTTxUUID
     private static let uartTxCharacteristicUUID = SmartRingBLE.nordicUARTRxUUID
     private static let deviceInfoServiceUUID = SmartRingBLE.deviceInfoServiceUUID
+    private static let firmwareRevisionCharUUID = SmartRingBLE.firmwareRevisionCharUUID
+    private static let hardwareRevisionCharUUID = SmartRingBLE.hardwareRevisionCharUUID
 
     // Command IDs — see RingConstants for documentation.
     private typealias CMD = RingConstants
@@ -671,6 +695,10 @@ extension RingSessionManager: CBCentralManagerDelegate {
         uartTxCharacteristic = nil
         colmiWriteCharacteristic = nil
         colmiNotifyCharacteristic = nil
+        // Reset raw sensor streaming state (connection is gone — no stop command needed).
+        rawSensorStreamActive = false
+        firmwareRevision = nil
+        hardwareRevision = nil
         // Reset sensor state directly (no BLE commands — connection is gone).
         sensorState = .idle
         spo2ContinueTimer?.invalidate()
@@ -741,7 +769,11 @@ extension RingSessionManager: CBPeripheralDelegate {
                     CBUUID(string: Self.uartTxCharacteristicUUID)
                 ], for: service)
             case CBUUID(string: Self.deviceInfoServiceUUID):
-                tLog("DEBUG: Found device info service")
+                tLog("DEBUG: Found device info service, discovering characteristics...")
+                peripheral.discoverCharacteristics([
+                    CBUUID(string: Self.firmwareRevisionCharUUID),
+                    CBUUID(string: Self.hardwareRevisionCharUUID)
+                ], for: service)
             case CBUUID(string: Self.colmiServiceUUID):
                 tLog("DEBUG: Found Colmi Big Data service, discovering characteristics...")
                 peripheral.discoverCharacteristics([
@@ -778,6 +810,12 @@ extension RingSessionManager: CBPeripheralDelegate {
                 tLog("DEBUG: Found Colmi Big Data notify characteristic")
                 self.colmiNotifyCharacteristic = characteristic
                 peripheral.setNotifyValue(true, for: characteristic)
+            case CBUUID(string: Self.firmwareRevisionCharUUID):
+                tLog("DEBUG: Found firmware revision characteristic — reading")
+                peripheral.readValue(for: characteristic)
+            case CBUUID(string: Self.hardwareRevisionCharUUID):
+                tLog("DEBUG: Found hardware revision characteristic — reading")
+                peripheral.readValue(for: characteristic)
             default:
                 tLog("DEBUG: Found other characteristic: \(characteristic.uuid)")
             }
@@ -814,11 +852,45 @@ extension RingSessionManager: CBPeripheralDelegate {
         
         let packet = [UInt8](value)
 
+        // Device Info Service reads (firmware/hardware revision) — plain UTF-8 strings.
+        if characteristic.uuid == CBUUID(string: Self.firmwareRevisionCharUUID) {
+            firmwareRevision = String(data: value, encoding: .utf8)?.trimmingCharacters(in: .controlCharacters)
+            tLog("[DeviceInfo] Firmware revision: \(firmwareRevision ?? "nil")")
+            return
+        }
+        if characteristic.uuid == CBUUID(string: Self.hardwareRevisionCharUUID) {
+            hardwareRevision = String(data: value, encoding: .utf8)?.trimmingCharacters(in: .controlCharacters)
+            tLog("[DeviceInfo] Hardware revision: \(hardwareRevision ?? "nil")")
+            return
+        }
+
         if characteristic.uuid == CBUUID(string: Self.colmiNotifyUUID) {
             appendToDebugLog(direction: .received, bytes: packet)
             if gymWorkoutInProgress {
                 let hex = packet.map { String(format: "%02x", $0) }.joined(separator: " ")
                 tLog("[WorkoutRX-BigData] len=\(packet.count) hex=\(hex)")
+            }
+            // Raw sensor (0xA1) packets arrive on this service but are NOT Big Data protocol.
+            // Intercept them before processBigDataChunk, which expects magic byte 0xBC.
+            if packet.first == CMD.cmdRawSensor {
+                let result = RingPacketDispatcher.dispatch(packet)
+                switch result {
+                case .rawPPG(let raw, _, _, _, let ts):
+                    rawPPGValue = raw; rawPPGCount += 1
+                    if rawStreamStartTime == nil { rawStreamStartTime = ts }
+                case .rawAccelerometer(let x, let y, let z, let ts):
+                    rawAccelX = x; rawAccelY = y; rawAccelZ = z; rawAccelCount += 1
+                    if rawStreamStartTime == nil { rawStreamStartTime = ts }
+                case .rawSpO2(let value, _, _, _, let ts):
+                    rawSpO2Count += 1
+                    if rawStreamStartTime == nil { rawStreamStartTime = ts }
+                    _ = value
+                case .rawSensorAck:
+                    tLog("[RawSensor] Ack on BigData service")
+                default:
+                    break
+                }
+                return
             }
             processBigDataChunk(packet)
             tLog(packet)
@@ -932,6 +1004,22 @@ extension RingSessionManager: CBPeripheralDelegate {
         case .sportRealTimeResponse(let pkt):   handleSportRealTimeResponse(packet: pkt)
         case .phoneSportResponse(let pkt):      handlePhoneSportResponse(packet: pkt)
         case .phoneSportNotify(let pkt):        handlePhoneSportNotify(packet: pkt)
+
+        // MARK: Raw sensor streaming (0xA1)
+        case .rawPPG(let raw, _, _, _, let ts):
+            rawPPGValue = raw
+            rawPPGCount += 1
+            if rawStreamStartTime == nil { rawStreamStartTime = ts }
+        case .rawAccelerometer(let x, let y, let z, let ts):
+            rawAccelX = x; rawAccelY = y; rawAccelZ = z
+            rawAccelCount += 1
+            if rawStreamStartTime == nil { rawStreamStartTime = ts }
+        case .rawSpO2(let value, _, _, _, let ts):
+            rawSpO2Count += 1
+            if rawStreamStartTime == nil { rawStreamStartTime = ts }
+            _ = value  // available for future use
+        case .rawSensorAck:
+            tLog("[RawSensor] Ack received")
 
         // MARK: Misc
         case .timeSyncAck(let success):
@@ -1684,6 +1772,62 @@ extension RingSessionManager {
         }
 
         tLog("[SportRT] b4=\(b4) b10=\(b10) derivedHR=\(sportRTDerivedHR.map(String.init) ?? "nil") samples=\(sportRTBeatSamples.count) pkt=\(packet.prefix(11).map { String($0) }.joined(separator: ","))")
+    }
+}
+
+// MARK: - Raw Sensor Streaming (CMD 0xA1)
+
+extension RingSessionManager {
+
+    /// Start raw sensor streaming (PPG + accelerometer + SpO2).
+    /// Sends 0xA1 0x04 on the UART service. Responses arrive on both services.
+    func startRawSensorStream() {
+        guard peripheralConnected, characteristicsDiscovered else {
+            tLog("[RawSensor] Cannot start — not connected")
+            return
+        }
+        do {
+            let packet = try makePacket(command: CMD.cmdRawSensor, subData: [CMD.rawSensorEnable])
+            sendPacket(packet: packet)
+            appendToDebugLog(direction: .sent, bytes: packet)
+            rawSensorStreamActive = true
+            rawPPGCount = 0; rawAccelCount = 0; rawSpO2Count = 0
+            rawStreamStartTime = nil
+            tLog("[RawSensor] Streaming ENABLED — sent 0xA1 0x04")
+        } catch {
+            tLog("[RawSensor] Failed to build enable packet: \(error)")
+        }
+    }
+
+    /// Stop raw sensor streaming.
+    func stopRawSensorStream() {
+        guard peripheralConnected else { return }
+        do {
+            let packet = try makePacket(command: CMD.cmdRawSensor, subData: [CMD.rawSensorDisable])
+            sendPacket(packet: packet)
+            appendToDebugLog(direction: .sent, bytes: packet)
+            rawSensorStreamActive = false
+            let elapsed = rawStreamStartTime.map { Date().timeIntervalSince($0) } ?? 0
+            tLog("[RawSensor] Streaming DISABLED — PPG:\(rawPPGCount) Accel:\(rawAccelCount) SpO2:\(rawSpO2Count) in \(String(format: "%.1f", elapsed))s")
+        } catch {
+            tLog("[RawSensor] Failed to build disable packet: \(error)")
+        }
+    }
+
+    /// Effective sample rate for raw PPG packets (Hz).
+    var rawPPGSampleRate: Double {
+        guard let start = rawStreamStartTime, rawPPGCount > 1 else { return 0 }
+        let elapsed = Date().timeIntervalSince(start)
+        guard elapsed > 0 else { return 0 }
+        return Double(rawPPGCount) / elapsed
+    }
+
+    /// Effective sample rate for raw accelerometer packets (Hz).
+    var rawAccelSampleRate: Double {
+        guard let start = rawStreamStartTime, rawAccelCount > 1 else { return 0 }
+        let elapsed = Date().timeIntervalSince(start)
+        guard elapsed > 0 else { return 0 }
+        return Double(rawAccelCount) / elapsed
     }
 }
 

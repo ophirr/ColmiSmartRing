@@ -187,6 +187,27 @@ enum RingConstants {
     /// Sub-data byte 3: max entries per response page (0x5F = 95).
     static let sleepQueryMaxEntries: UInt8 = 95
 
+    // MARK: - Raw Sensor Streaming (CMD 0xA1)
+    //
+    // Enables raw PPG waveform + 3-axis accelerometer + SpO2 streaming.
+    // Command is sent on the UART service; responses arrive on both UART
+    // and Big Data notify characteristics with 0xA1 prefix.
+    // Reference: Edge Impulse example-data-collection-colmi-r02.
+
+    /// Raw sensor streaming command (0xA1).
+    static let cmdRawSensor: UInt8             = 0xA1  // 161
+    /// Sub-command to enable raw sensor streaming.
+    static let rawSensorEnable: UInt8          = 0x04
+    /// Sub-command to disable raw sensor streaming.
+    static let rawSensorDisable: UInt8         = 0x02
+
+    /// Response subtypes within 0xA1 packets (byte[1]).
+    enum RawSensorType: UInt8 {
+        case spo2          = 0x01
+        case ppg           = 0x02
+        case accelerometer = 0x03
+    }
+
     // MARK: - Phone Sport Mode (CMD 0x77 / 0x78)
 
     /// Action codes for CMD_PHONE_SPORT (byte 1).

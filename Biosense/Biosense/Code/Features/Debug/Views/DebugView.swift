@@ -67,6 +67,41 @@ struct DebugView: View {
                     .disabled(commandValue == nil || (payloadHex.isEmpty == false && payloadBytes == nil) || !ringSessionManager.peripheralConnected)
                 }
 
+                Section("Raw Sensor Streaming (0xA1)") {
+                    Button {
+                        if ringSessionManager.rawSensorStreamActive {
+                            ringSessionManager.stopRawSensorStream()
+                        } else {
+                            ringSessionManager.startRawSensorStream()
+                        }
+                    } label: {
+                        Label(
+                            ringSessionManager.rawSensorStreamActive ? "Stop Raw Stream" : "Start Raw Stream",
+                            systemImage: ringSessionManager.rawSensorStreamActive ? "stop.circle.fill" : "waveform.circle.fill"
+                        )
+                        .frame(maxWidth: .infinity)
+                        .font(.headline.weight(.semibold))
+                    }
+                    .disabled(!ringSessionManager.peripheralConnected)
+                    .tint(ringSessionManager.rawSensorStreamActive ? .red : .green)
+
+                    if ringSessionManager.rawSensorStreamActive || ringSessionManager.rawPPGCount > 0 {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("PPG raw: \(ringSessionManager.rawPPGValue)")
+                                .font(.system(.caption, design: .monospaced))
+                            Text("Accel X:\(ringSessionManager.rawAccelX) Y:\(ringSessionManager.rawAccelY) Z:\(ringSessionManager.rawAccelZ)")
+                                .font(.system(.caption, design: .monospaced))
+                            Text("Packets — PPG:\(ringSessionManager.rawPPGCount)  Accel:\(ringSessionManager.rawAccelCount)  SpO2:\(ringSessionManager.rawSpO2Count)")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                            Text("Rate — PPG:\(String(format: "%.1f", ringSessionManager.rawPPGSampleRate)) Hz  Accel:\(String(format: "%.1f", ringSessionManager.rawAccelSampleRate)) Hz")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
                 Section(L10n.Debug.sleepSection) {
                     Button {
                         ringSessionManager.syncSleep()

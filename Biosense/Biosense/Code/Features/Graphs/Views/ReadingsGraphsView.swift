@@ -24,6 +24,10 @@ struct ReadingsGraphsView: View {
     @State private var selectedDate: Date = Date()
     @State private var visibleWeekOffset: Int?
 
+    /// For sub-day ranges (1H/6H/12H): offset in number-of-windows from now.
+    /// 0 = most recent window ending at now, 1 = one window back, etc.
+    @State private var selectedSubDayOffset: Int = 0
+
     private let maxPastWeeks = 104
 
     private var sortedSleepDays: [StoredSleepDay] {
@@ -62,6 +66,64 @@ struct ReadingsGraphsView: View {
         mondayCalendar.date(byAdding: .day, value: 1, to: selectedDayStart) ?? selectedDayStart.addingTimeInterval(24 * 60 * 60)
     }
 
+    // MARK: - Sub-day range (1H / 6H / 12H)
+
+    /// End of the sub-day window.
+    /// Offset 0: end = now (trailing window shows most recent data).
+    /// Offset ≥ 1: snapped to clean hour-aligned boundaries stepping back from now.
+    private var subDayRangeEnd: Date {
+        let cal = mondayCalendar
+        let now = Date()
+        let duration = selectedTimeRange.durationSeconds
+        let blockHours = Int(duration / 3600)  // 1, 6, or 12
+
+        if selectedSubDayOffset == 0 {
+            return now
+        }
+
+        // Snap "now" down to the current block boundary to create a clean anchor.
+        // e.g. at 16:20 with 1H blocks → anchor = 16:00; with 6H → anchor = 12:00
+        let hour = cal.component(.hour, from: now)
+        let blockStart = (hour / blockHours) * blockHours
+        let comps = cal.dateComponents([.year, .month, .day], from: now)
+        let dayStart = cal.date(from: comps) ?? now
+        let anchor = dayStart.addingTimeInterval(TimeInterval(blockStart) * 3600)
+
+        // offset 1 = the block ending at anchor, offset 2 = one before that, etc.
+        return anchor.addingTimeInterval(-Double(selectedSubDayOffset - 1) * duration)
+    }
+
+    /// Start of the sub-day window.
+    private var subDayRangeStart: Date {
+        subDayRangeEnd.addingTimeInterval(-selectedTimeRange.durationSeconds)
+    }
+
+    /// Label for the sub-day navigation row.
+    /// Always includes the date so context is clear when navigating into the past.
+    /// Offset 0 shows "Now" label; historical offsets show clean hour ranges.
+    private var subDayLabel: String {
+        let start = subDayRangeStart
+        let end = subDayRangeEnd
+        let dateFmt = Date.FormatStyle().month(.abbreviated).day()
+        let startDay = mondayCalendar.startOfDay(for: start)
+        let endDay = mondayCalendar.startOfDay(for: end)
+
+        if selectedSubDayOffset == 0 {
+            // Trailing window: show "Mar 19, 3:20 PM – Now"
+            let timeFmt = Date.FormatStyle().hour().minute()
+            return "\(start.formatted(dateFmt)), \(start.formatted(timeFmt)) – Now"
+        }
+
+        // Historical: clean hour boundaries
+        let timeFmt = Date.FormatStyle().hour()
+        if startDay == endDay {
+            return "\(start.formatted(dateFmt)), \(start.formatted(timeFmt)) – \(end.formatted(timeFmt))"
+        } else {
+            let dayTimeFmt = Date.FormatStyle().month(.abbreviated).day().hour()
+            return "\(start.formatted(dayTimeFmt)) – \(end.formatted(dayTimeFmt))"
+        }
+    }
+
     // MARK: - Multi-day range (week / month)
 
     private func monthStart(for offset: Int) -> Date {
@@ -72,6 +134,8 @@ struct ReadingsGraphsView: View {
 
     private var selectedRangeStart: Date {
         switch selectedTimeRange {
+        case .hour1, .hour6, .hour12:
+            return subDayRangeStart
         case .day:   return selectedDayStart
         case .week:  return weekStart(for: selectedWeekOffset)
         case .month: return monthStart(for: selectedMonthOffset)
@@ -80,6 +144,8 @@ struct ReadingsGraphsView: View {
 
     private var selectedRangeEnd: Date {
         switch selectedTimeRange {
+        case .hour1, .hour6, .hour12:
+            return subDayRangeEnd
         case .day:   return selectedDayEnd
         case .week:
             return mondayCalendar.date(byAdding: .day, value: 7, to: weekStart(for: selectedWeekOffset)) ?? selectedDayEnd
@@ -88,10 +154,16 @@ struct ReadingsGraphsView: View {
         }
     }
 
-    /// X-axis domain for week/month charts (nil for day mode).
+    /// X-axis domain for charts. nil for day mode (automatic scaling), explicit for everything else.
     private var chartXDomain: ClosedRange<Date>? {
-        guard selectedTimeRange != .day else { return nil }
-        return selectedRangeStart...selectedRangeEnd
+        switch selectedTimeRange {
+        case .hour1, .hour6, .hour12:
+            return subDayRangeStart...subDayRangeEnd
+        case .day:
+            return nil
+        case .week, .month:
+            return selectedRangeStart...selectedRangeEnd
+        }
     }
 
     /// Label for the currently selected week (e.g. "Mar 3 – 9, 2026").
@@ -109,7 +181,7 @@ struct ReadingsGraphsView: View {
         return start.formatted(.dateTime.month(.wide).year())
     }
 
-    // MARK: - Range-filtered data (week / month)
+    // MARK: - Range-filtered data (all ranges)
 
     private var rangeActivitySamples: [StoredActivitySample] {
         storedActivitySamples.filter { $0.timestamp >= selectedRangeStart && $0.timestamp < selectedRangeEnd }
@@ -194,6 +266,8 @@ struct ReadingsGraphsView: View {
             .sorted { $0.time < $1.time }
     }
 
+    // MARK: - Day-specific data (used for sub-day and day ranges)
+
     private var selectedDayHeartRateLogs: [StoredHeartRateLog] {
         storedHeartRateLogs
             .filter { isWithinSelectedDay($0.dayStart) }
@@ -231,6 +305,69 @@ struct ReadingsGraphsView: View {
     init(ringSessionManager: RingSessionManager, includeActivitySection: Bool = true) {
         self.ringSessionManager = ringSessionManager
         self.includeActivitySection = includeActivitySection
+    }
+
+    // MARK: - Sub-day & day range data accessors
+
+    /// Activity data for sub-day ranges: filter the range-filtered samples.
+    private var subDayActivityStepsData: [TimeSeriesPoint] {
+        rangeActivitySamples.map { TimeSeriesPoint(time: $0.timestamp, value: Double($0.steps)) }
+    }
+
+    private var subDayActivityDistanceData: [TimeSeriesPoint] {
+        rangeActivitySamples.map { TimeSeriesPoint(time: $0.timestamp, value: $0.distanceKm) }
+    }
+
+    private var subDayActivityCaloriesData: [TimeSeriesPoint] {
+        rangeActivitySamples.map { TimeSeriesPoint(time: $0.timestamp, value: Double($0.calories)) }
+    }
+
+    private var subDayHRVData: [TimeSeriesPoint] {
+        let now = Date()
+        return rangeHRVSamples
+            .filter { $0.timestamp <= now }
+            .map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) }
+    }
+
+    private var subDayBloodOxygenData: [TimeSeriesPoint] {
+        let now = Date()
+        return rangeBloodOxygenSamples
+            .filter { $0.timestamp <= now }
+            .map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) }
+    }
+
+    private var subDayStressData: [TimeSeriesPoint] {
+        let now = Date()
+        return rangeStressSamples
+            .filter { $0.timestamp <= now }
+            .map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) }
+    }
+
+    /// Heart rate points for sub-day ranges: extract from day HR logs that overlap the window.
+    /// When the window spans midnight we need logs from both days.
+    private var subDayHeartRatePoints: [HeartRateDataPoint] {
+        return subDayHeartRateLogs.flatMap { log in
+            log.toHeartRateLog().heartRatesWithTimes()
+                .map { HeartRateDataPoint(heartRate: $0.0, time: $0.1) }
+        }
+        .filter { $0.time >= subDayRangeStart && $0.time < subDayRangeEnd }
+        .sorted { $0.time < $1.time }
+    }
+
+    /// For sub-day HR: find HR logs whose day overlaps the sub-day window.
+    /// A 12H or 6H window can span midnight, so we may need logs from two adjacent days.
+    private var subDayHeartRateLogs: [StoredHeartRateLog] {
+        let windowStartDay = mondayCalendar.startOfDay(for: subDayRangeStart)
+        let windowEndDay = mondayCalendar.startOfDay(for: subDayRangeEnd)
+        // Collect all days that intersect the window
+        var days: Set<Date> = [windowStartDay]
+        if windowEndDay != windowStartDay {
+            days.insert(windowEndDay)
+        }
+        return days.compactMap { dayStart in
+            let dayEnd = mondayCalendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart.addingTimeInterval(86400)
+            return storedHeartRateLogs.first { $0.dayStart >= dayStart && $0.dayStart < dayEnd }
+        }
     }
 
     private var activityStepsData: [TimeSeriesPoint] {
@@ -307,6 +444,7 @@ struct ReadingsGraphsView: View {
                 selectedDate = todayStart
                 selectedWeekOffset = 0
                 selectedMonthOffset = 0
+                selectedSubDayOffset = 0
                 visibleWeekOffset = 0
             }
         }
@@ -316,14 +454,38 @@ struct ReadingsGraphsView: View {
 
     private var timeRangePickerSection: some View {
         Section {
-            Picker("Time Range", selection: $selectedTimeRange) {
-                ForEach(TimeRange.allCases) { range in
-                    Text(range.displayName).tag(range)
+            VStack(spacing: 8) {
+                // Sub-day pills row (smaller)
+                HStack(spacing: 6) {
+                    ForEach([TimeRange.hour1, .hour6, .hour12], id: \.self) { range in
+                        Button {
+                            selectedTimeRange = range
+                        } label: {
+                            Text(range.displayName)
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .frame(maxWidth: .infinity)
+                                .background(selectedTimeRange == range ? Color.purple : Color(.tertiarySystemGroupedBackground))
+                                .foregroundStyle(selectedTimeRange == range ? .white : .primary)
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
+
+                // Standard range picker (Day / Week / Month)
+                Picker("Time Range", selection: $selectedTimeRange) {
+                    ForEach([TimeRange.day, .week, .month], id: \.self) { range in
+                        Text(range.displayName).tag(range)
+                    }
+                }
+                .pickerStyle(.segmented)
             }
-            .pickerStyle(.segmented)
 
             switch selectedTimeRange {
+            case .hour1, .hour6, .hour12:
+                subDayNavigationRow
             case .day:
                 dayPickerInline
             case .week:
@@ -332,6 +494,30 @@ struct ReadingsGraphsView: View {
                 monthNavigationRow
             }
         }
+    }
+
+    // MARK: - Sub-day navigation
+
+    private var subDayNavigationRow: some View {
+        HStack {
+            Button { selectedSubDayOffset += 1 } label: {
+                Image(systemName: "chevron.left")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            Spacer()
+            Text(subDayLabel)
+                .font(.subheadline.weight(.medium))
+            Spacer()
+            Button { selectedSubDayOffset -= 1 } label: {
+                Image(systemName: "chevron.right")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .disabled(selectedSubDayOffset <= 0)
+        }
+        .buttonStyle(.borderless)
+        .padding(.vertical, 4)
     }
 
     private var dayPickerInline: some View {
@@ -453,6 +639,18 @@ struct ReadingsGraphsView: View {
     private var sleepSection: some View {
         Section {
             switch selectedTimeRange {
+            case .hour1, .hour6, .hour12:
+                // Sleep doesn't make sense at sub-day granularity; show day-level data
+                if let storedDay = selectedSleepDay {
+                    let day = storedDay.toSleepDay()
+                    VStack(alignment: .leading, spacing: 16) {
+                        SleepChartKitView(day: day, nightDate: storedDay.sleepDate)
+                        SleepStageGraphView(day: day)
+                    }
+                    .padding(.vertical, 8)
+                } else {
+                    emptyStateView(message: L10n.Graphs.noSleepData)
+                }
             case .day:
                 if let storedDay = selectedSleepDay {
                     let day = storedDay.toSleepDay()
@@ -502,6 +700,13 @@ struct ReadingsGraphsView: View {
     /// `forward: true` moves toward the present; `forward: false` moves into the past.
     private func navigateTimePeriod(forward: Bool) {
         switch selectedTimeRange {
+        case .hour1, .hour6, .hour12:
+            if forward {
+                guard selectedSubDayOffset > 0 else { return }
+                selectedSubDayOffset -= 1
+            } else {
+                selectedSubDayOffset += 1
+            }
         case .day:
             if forward {
                 guard selectedDayStart < todayStart else { return }
@@ -567,6 +772,18 @@ struct ReadingsGraphsView: View {
     private var heartRateSection: some View {
         Section {
             switch selectedTimeRange {
+            case .hour1, .hour6, .hour12:
+                if subDayHeartRatePoints.isEmpty {
+                    emptyStateView(message: L10n.Graphs.noHeartRateData)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Heart rate")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        HeartRateGraphView(data: subDayHeartRatePoints, timeRange: selectedTimeRange, xDomain: chartXDomain)
+                    }
+                    .padding(.vertical, 8)
+                }
             case .day:
                 if selectedDayHeartRateLogs.isEmpty {
                     emptyStateView(message: L10n.Graphs.noHeartRateData)
@@ -619,7 +836,7 @@ struct ReadingsGraphsView: View {
             .map { HeartRateDataPoint(heartRate: $0.0, time: $0.1) }
         let interval = log.range > 0 ? log.range : 5
         return VStack(alignment: .leading, spacing: 8) {
-            Text("Heart rate (\(interval)‑min intervals)")
+            Text("Heart rate (\(interval)-min intervals)")
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
             if points.isEmpty {
@@ -641,6 +858,16 @@ struct ReadingsGraphsView: View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
                 switch selectedTimeRange {
+                case .hour1, .hour6, .hour12:
+                    if subDayActivityStepsData.isEmpty {
+                        Text(L10n.Graphs.sampleActivity)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        ActivityBarChartView(data: subDayActivityStepsData, title: "Steps", timeRange: selectedTimeRange, xDomain: chartXDomain)
+                        ActivityBarChartView(data: subDayActivityDistanceData, title: "Distance", color: .green, yLabel: "Km", timeRange: selectedTimeRange, xDomain: chartXDomain)
+                        ActivityCaloriesChartView(data: subDayActivityCaloriesData, timeRange: selectedTimeRange, xDomain: chartXDomain)
+                    }
                 case .day:
                     if activityStepsData.isEmpty || activityDistanceData.isEmpty || activityCaloriesData.isEmpty {
                         Text(L10n.Graphs.sampleActivity)
@@ -701,6 +928,14 @@ struct ReadingsGraphsView: View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
                 switch selectedTimeRange {
+                case .hour1, .hour6, .hour12:
+                    if subDayHRVData.isEmpty {
+                        Text(L10n.Graphs.sampleHRV)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        HRVChartView(data: subDayHRVData, timeRange: selectedTimeRange, xDomain: chartXDomain)
+                    }
                 case .day:
                     if hrvData.isEmpty {
                         Text(L10n.Graphs.sampleHRV)
@@ -731,6 +966,14 @@ struct ReadingsGraphsView: View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
                 switch selectedTimeRange {
+                case .hour1, .hour6, .hour12:
+                    if subDayBloodOxygenData.isEmpty {
+                        Text(L10n.Graphs.sampleBloodOxygen)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        BloodOxygenChartView(data: subDayBloodOxygenData, timeRange: selectedTimeRange, xDomain: chartXDomain)
+                    }
                 case .day:
                     if bloodOxygenData.isEmpty {
                         Text(L10n.Graphs.sampleBloodOxygen)
@@ -761,6 +1004,14 @@ struct ReadingsGraphsView: View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
                 switch selectedTimeRange {
+                case .hour1, .hour6, .hour12:
+                    if subDayStressData.isEmpty {
+                        Text(L10n.Graphs.sampleStress)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        StressChartView(data: subDayStressData, timeRange: selectedTimeRange, xDomain: chartXDomain)
+                    }
                 case .day:
                     if stressData.isEmpty {
                         Text(L10n.Graphs.sampleStress)

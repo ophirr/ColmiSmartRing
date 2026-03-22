@@ -16,6 +16,18 @@ struct LiveHRSample: Identifiable {
     let timestamp: Date
     let bpm: Int
     let zone: HRZone
+    /// True if this reading was corrected by the cadence rejection filter.
+    let cadenceFiltered: Bool
+    /// Confidence in this HR value (1.0 = clean, <0.5 = uncertain/corrected).
+    let confidence: Double
+
+    init(timestamp: Date, bpm: Int, zone: HRZone, cadenceFiltered: Bool = false, confidence: Double = 1.0) {
+        self.timestamp = timestamp
+        self.bpm = bpm
+        self.zone = zone
+        self.cadenceFiltered = cadenceFiltered
+        self.confidence = confidence
+    }
 }
 
 enum GymWorkoutState {
@@ -79,6 +91,17 @@ class GymSessionManager {
 
     /// True when the ring is connected and streaming HR data.
     var isReceivingData: Bool { currentBPM > 0 }
+
+    // MARK: - Cadence Rejection Filter
+
+    /// Current filter confidence (1.0 = clean reading, <0.5 = corrected/uncertain).
+    var hrConfidence: Double = 1.0
+    /// Whether the filter is currently correcting a cadence-coupled reading.
+    var isCadenceFiltered: Bool = false
+    /// Current running cadence in SPM (from 0x78 step deltas).
+    var currentCadenceSPM: Int = 0
+
+    private var cadenceFilter = CadenceRejectionFilter()
 
     // MARK: - Private
 
@@ -238,6 +261,12 @@ class GymSessionManager {
         continueTask = nil
         workoutState = .finished
 
+        // Log cadence filter stats
+        let total = cadenceFilter.totalReadings
+        let flagged = cadenceFilter.flaggedReadings
+        let pct = total > 0 ? String(format: "%.1f%%", Double(flagged) / Double(total) * 100) : "0%"
+        tLog("[Gym] Cadence filter — total=\(total) flagged=\(flagged) (\(pct))")
+
         // End phone sport mode (0x77) — must be sent before exitWorkoutMode
         // so the ring finalizes sport data while still connected.
         ringManager?.sendPhoneSport(action: .end, type: .running)
@@ -330,7 +359,18 @@ class GymSessionManager {
         let sportRTAge = ringManager?.lastSportRTPacketTime.map { now.timeIntervalSince($0) } ?? .infinity
         let sportRTActive = sportRTAge < 5.0
 
-        if dataFresh, let bpm = ringManager?.realTimeHeartRateBPM, bpm > 0 {
+        if dataFresh, let rawBPM = ringManager?.realTimeHeartRateBPM, rawBPM > 0 {
+            // Apply cadence rejection filter (uses 0x78 step deltas to detect coupling)
+            let filterResult = cadenceFilter.process(
+                rawBPM: rawBPM,
+                cumulativeSteps: ringManager?.phoneSportSteps ?? 0,
+                timestamp: now
+            )
+            let bpm = filterResult.bpm
+            hrConfidence = filterResult.confidence
+            isCadenceFiltered = filterResult.wasCorrected
+            currentCadenceSPM = filterResult.cadenceSPM
+
             currentBPM = bpm
             let newZone = zoneConfig.zone(for: bpm)
 
@@ -346,7 +386,11 @@ class GymSessionManager {
 
             // Record sample (~1 per second)
             if lastSampleTime == nil || now.timeIntervalSince(lastSampleTime!) >= 0.9 {
-                let sample = LiveHRSample(timestamp: now, bpm: bpm, zone: currentZone)
+                let sample = LiveHRSample(
+                    timestamp: now, bpm: bpm, zone: currentZone,
+                    cadenceFiltered: filterResult.wasCorrected,
+                    confidence: filterResult.confidence
+                )
                 samples.append(sample)
                 lastSampleTime = now
             }
@@ -526,6 +570,10 @@ class GymSessionManager {
         watchdogFired = false
         lastWatchdogRestartTime = nil
         lastContinueKeepAliveTime = nil
+        cadenceFilter.reset()
+        hrConfidence = 1.0
+        isCadenceFiltered = false
+        currentCadenceSPM = 0
     }
 }
 
@@ -545,7 +593,7 @@ struct CompletedWorkout {
     let sportDistanceM: Int
 
     func toStoredSession() -> StoredGymSession {
-        let storedSamples = samples.map { GymHRSample(timestamp: $0.timestamp, bpm: $0.bpm) }
+        let storedSamples = samples.map { GymHRSample(timestamp: $0.timestamp, bpm: $0.bpm, cadenceFiltered: $0.cadenceFiltered) }
         return StoredGymSession(
             startTime: startTime,
             endTime: endTime,
