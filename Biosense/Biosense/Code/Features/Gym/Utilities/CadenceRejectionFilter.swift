@@ -44,7 +44,7 @@ final class CadenceRejectionFilter {
 
     /// Minimum cadence (SPM) to activate filtering.
     /// 140 SPM is a slow jog; walking cadence (~100-120) rarely overlaps HR range.
-    static let activationCadenceSPM: Int = 140
+    static let activationCadenceSPM: Int = 114
 
     /// Consecutive flagged seconds before held HR starts decaying.
     static let holdDecayOnsetSeconds: Int = 15

@@ -274,6 +274,32 @@ final class InfluxDBWriter {
         write("gym_hr,source=colmi_r02\(tag),session_id=\(sessionID) bpm=\(bpm)i \(epochSeconds(time))")
     }
 
+    /// Write a full workout telemetry tick (~1/sec during workouts).
+    /// Measurement: `workout` with all real-time fields for post-hoc analysis.
+    func writeWorkoutTick(
+        bpm: Int,
+        rawBPM: Int,
+        cadenceSPM: Int,
+        distanceM: Int,
+        steps: Int,
+        confidence: Double,
+        cadenceFiltered: Bool,
+        zone: String,
+        sessionID: String,
+        time: Date
+    ) {
+        let fields = [
+            "bpm=\(bpm)i",
+            "raw_bpm=\(rawBPM)i",
+            "cadence_spm=\(cadenceSPM)i",
+            "distance_m=\(distanceM)i",
+            "steps=\(steps)i",
+            "confidence=\(String(format: "%.2f", confidence))",
+            "cadence_filtered=\(cadenceFiltered)",
+        ].joined(separator: ",")
+        write("workout,source=colmi_r02,session_id=\(sessionID),zone=\(zone) \(fields) \(epochSeconds(time))")
+    }
+
     func writeBattery(level: Int, charging: Bool, time: Date) {
         // Only write level — InfluxDB Cloud schema locked `charging` as boolean
         // from earlier writes, and changing to integer causes schema conflicts.

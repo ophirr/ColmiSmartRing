@@ -961,9 +961,15 @@ extension RingSessionManager: CBPeripheralDelegate {
         // MARK: RT HR via command 30 (0x1E)
         case .rtHR(let bpm, let timestamp):
             lastRealTimeHRPacketTime = timestamp
-            realTimeHeartRateBPM = bpm
-            tLog("[RT-HR30] heartRate=\(bpm)")
-            throttledInfluxHRWrite(bpm: bpm, at: timestamp)
+            if spotCheckActive && spotCheckType == .realtimeHeartRate {
+                // During HR spot-check, collect for median — don't write warmup noise to InfluxDB.
+                spotCheckHRReadings.append(bpm)
+                tLog("[RT-HR30] heartRate=\(bpm) (spot-check sample \(spotCheckHRReadings.count))")
+            } else {
+                realTimeHeartRateBPM = bpm
+                tLog("[RT-HR30] heartRate=\(bpm)")
+                throttledInfluxHRWrite(bpm: bpm, at: timestamp)
+            }
 
         case .rtHRZero(let timestamp):
             lastRealTimeHRPacketTime = timestamp

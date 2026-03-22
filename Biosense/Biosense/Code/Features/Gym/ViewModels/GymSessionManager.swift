@@ -124,6 +124,8 @@ class GymSessionManager {
     private var timerTask: Task<Void, Never>?
     private var continueTask: Task<Void, Never>?
     private var workoutStartTime: Date?
+    /// Stable session ID for InfluxDB tagging (set once at workout start).
+    private var workoutSessionID: String = ""
     private var pauseAccumulated: TimeInterval = 0
     private var lastPauseStart: Date?
     private var lastSampleTime: Date?
@@ -191,7 +193,9 @@ class GymSessionManager {
         continueTask?.cancel()
         resetState()
         workoutState = .active
-        workoutStartTime = Date()
+        let start = Date()
+        workoutStartTime = start
+        workoutSessionID = ISO8601DateFormatter().string(from: start)
         lastZoneTickTime = Date()
         previousZone = .rest
 
@@ -393,6 +397,20 @@ class GymSessionManager {
                 )
                 samples.append(sample)
                 lastSampleTime = now
+
+                // Write full telemetry tick to InfluxDB for post-hoc analysis
+                InfluxDBWriter.shared.writeWorkoutTick(
+                    bpm: bpm,
+                    rawBPM: rawBPM,
+                    cadenceSPM: filterResult.cadenceSPM,
+                    distanceM: sportDistanceM,
+                    steps: sportSteps,
+                    confidence: filterResult.confidence,
+                    cadenceFiltered: filterResult.wasCorrected,
+                    zone: currentZone.label,
+                    sessionID: workoutSessionID,
+                    time: now
+                )
             }
         } else if sportRTActive {
             // Sport RT is flowing — ring is on wrist and exercising.
