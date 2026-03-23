@@ -2326,16 +2326,22 @@ extension RingSessionManager {
         keepalivePingCount += 1
 
         // Spot-check rotation: only start when sensor is idle.
-        // SpO2 every 10th ping (~10 min) with a 60s window; temperature every
-        // 3rd non-SpO2 ping; everything else is HR.
+        // HR is well-covered by the ring's onboard 3-min logger (~20 readings/hour),
+        // so spot-checks alternate between SpO2 and temp to maximize their data density.
+        // SpO2 every 2nd ping (~2 min) with a 60s convergence window.
+        // Temp every 2nd ping (interleaved with SpO2) with a 20s window.
+        // HR spot-check every Nth ping to supplement the onboard logger.
         if sensorState == .idle {
             let type: RealTimeReading
             if keepalivePingCount % RingConstants.spotCheckSpO2EveryNPings == 0 && keepalivePingCount > 0 {
                 type = .spo2
             } else if keepalivePingCount % RingConstants.spotCheckTempEveryNPings == 0 && keepalivePingCount > 0 {
                 type = .temperature
-            } else {
+            } else if keepalivePingCount % RingConstants.spotCheckHREveryNPings == 0 && keepalivePingCount > 0 {
                 type = .realtimeHeartRate
+            } else {
+                // Default: alternate SpO2 and temp on remaining slots
+                type = keepalivePingCount % 2 == 0 ? .spo2 : .temperature
             }
             startSpotCheck(type: type)
             // Don't schedule next keepalive now — it will be scheduled when
