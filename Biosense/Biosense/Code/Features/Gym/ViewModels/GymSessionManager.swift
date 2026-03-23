@@ -413,11 +413,25 @@ class GymSessionManager {
                 )
             }
         } else if sportRTActive {
-            // Sport RT is flowing — ring is on wrist and exercising.
-            // Try to use HR derived from sport RT beat counter (byte[10]).
-            if let derivedBPM = ringManager?.sportRTDerivedHR, derivedBPM > 0 {
-                currentBPM = derivedBPM
-                let newZone = zoneConfig.zone(for: derivedBPM)
+            // Sport RT (0x73) is flowing — the 0x69 HR stream is displaced.
+            // Use phoneSportHR (byte[5] of 0x78) as the HR source — this is
+            // the ring's own PPG reading, same value shown on the ring face.
+            // Route it through the cadence filter and write telemetry just
+            // like the 0x69 path so we don't lose workout data in InfluxDB.
+            let sportHR = ringManager?.phoneSportHR ?? 0
+            if sportHR > 0 {
+                let filterResult = cadenceFilter.process(
+                    rawBPM: sportHR,
+                    cumulativeSteps: ringManager?.phoneSportSteps ?? 0,
+                    timestamp: now
+                )
+                let bpm = filterResult.bpm
+                hrConfidence = filterResult.confidence
+                isCadenceFiltered = filterResult.wasCorrected
+                currentCadenceSPM = filterResult.cadenceSPM
+
+                currentBPM = bpm
+                let newZone = zoneConfig.zone(for: bpm)
 
                 if newZone != previousZone && hapticsEnabled {
                     fireZoneHaptic(from: previousZone, to: newZone)
@@ -426,17 +440,34 @@ class GymSessionManager {
                 currentZone = newZone
                 previousZone = newZone
 
-                if derivedBPM > peakBPM { peakBPM = derivedBPM }
+                if bpm > peakBPM { peakBPM = bpm }
 
                 if lastSampleTime == nil || now.timeIntervalSince(lastSampleTime!) >= 0.9 {
-                    let sample = LiveHRSample(timestamp: now, bpm: derivedBPM, zone: currentZone)
+                    let sample = LiveHRSample(
+                        timestamp: now, bpm: bpm, zone: currentZone,
+                        cadenceFiltered: filterResult.wasCorrected,
+                        confidence: filterResult.confidence
+                    )
                     samples.append(sample)
                     lastSampleTime = now
+
+                    InfluxDBWriter.shared.writeWorkoutTick(
+                        bpm: bpm,
+                        rawBPM: sportHR,
+                        cadenceSPM: filterResult.cadenceSPM,
+                        distanceM: sportDistanceM,
+                        steps: sportSteps,
+                        confidence: filterResult.confidence,
+                        cadenceFiltered: filterResult.wasCorrected,
+                        zone: currentZone.label,
+                        sessionID: workoutSessionID,
+                        time: now
+                    )
                 }
 
-                tLog("[GymTick] Using sport RT derived HR: \(derivedBPM) BPM")
+                tLog("[GymTick] phoneSportHR=\(sportHR) filtered=\(bpm) cadence=\(filterResult.cadenceSPM)SPM corrected=\(filterResult.wasCorrected) conf=\(String(format: "%.2f", filterResult.confidence))")
             } else if currentBPM > 0 {
-                // No derived HR yet — hold last known value.
+                // No HR from 0x78 yet — hold last known value.
             } else {
                 currentBPM = 0
             }
