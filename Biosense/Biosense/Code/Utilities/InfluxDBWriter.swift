@@ -297,7 +297,9 @@ final class InfluxDBWriter {
             "confidence=\(String(format: "%.2f", confidence))",
             "cadence_filtered=\(cadenceFiltered)",
         ].joined(separator: ",")
-        write("workout,source=colmi_r02,session_id=\(sessionID),zone=\(zone) \(fields) \(epochSeconds(time))")
+        // InfluxDB line protocol: spaces in tag values must be escaped with backslash
+        let escapedZone = zone.replacingOccurrences(of: " ", with: "\\ ")
+        write("workout,source=colmi_r02,session_id=\(sessionID),zone=\(escapedZone) \(fields) \(epochSeconds(time))")
     }
 
     func writeBattery(level: Int, charging: Bool, time: Date) {
