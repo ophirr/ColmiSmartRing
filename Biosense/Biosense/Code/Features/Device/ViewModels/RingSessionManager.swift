@@ -604,13 +604,27 @@ extension RingSessionManager: CBCentralManagerDelegate {
                 actuallyStartScan()
             } else if let id = savedRingIdentifier {
                 if let known = central.retrievePeripherals(withIdentifiers: [id]).first {
-                    tLog("Found previously connected peripheral")
+                    tLog("Found previously connected peripheral (state=\(known.state.rawValue))")
                     peripheral = known
                     peripheral?.delegate = self
-                    if known.state == .connected {
+                    if known.state == .connected && peripheralConnected {
+                        // Genuinely connected from this session — safe to reuse.
                         tLog("[Connect] Already connected — discovering services")
-                        peripheralConnected = true
                         known.discoverServices(nil)
+                    } else if known.state == .connected {
+                        // Restored as .connected but we weren't tracking it — the
+                        // BLE link is likely stale from a prior session.  Cycle the
+                        // connection so the radio re-establishes fresh.
+                        tLog("[Connect] Stale .connected state — cycling connection")
+                        central.cancelPeripheralConnection(known)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + RingConstants.connectRetryDelay) { [weak self] in
+                            guard let self, let p = self.peripheral, self.manager.state == .poweredOn else { return }
+                            tLog("[Connect] Re-connecting after stale cancel")
+                            self.manager.connect(p, options: [
+                                CBConnectPeripheralOptionNotifyOnConnectionKey: true,
+                                CBConnectPeripheralOptionNotifyOnDisconnectionKey: true
+                            ])
+                        }
                     } else {
                         // Cancel any stale .connecting state from a restored session
                         // (e.g. after factory reset the old bond is invalid and the

@@ -147,6 +147,18 @@ enum RingPacketDispatcher {
         case CMD.cmdRawSensor:
             return parseRawSensor(packet)
 
+        // MARK: Known informational responses (no action needed)
+        case 0x04:  // Settings readback (display/language/profile) — empty payload
+            return .ack
+        case 0x0A:  // Alarm/reminder settings readback (sub 1, 2)
+            return .ack
+        case 0x21:  // Goals readback (step/distance/calorie targets)
+            return .ack
+        case 0x3B:  // Monitoring toggle readback (continuous SpO2/exercise detection)
+            return .ack
+        case 0x3C:  // Big Data flow control / readiness response
+            return .ack
+
         // MARK: Acks and special
         case Counter.shared.CMD_X:
             return .counterX

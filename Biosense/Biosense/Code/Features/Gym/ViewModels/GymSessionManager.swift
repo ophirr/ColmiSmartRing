@@ -346,27 +346,53 @@ class GymSessionManager {
         guard workoutState == .active, let start = workoutStartTime else { return }
         elapsedSeconds = Date().timeIntervalSince(start) - pauseAccumulated
 
-        // Read latest HR from ring manager
         let now = Date()
 
-        // Treat the reading as stale if no HR packets have arrived in the
-        // last few seconds.  The ring streams ~1 packet/s when active, so
-        // a gap > 5 s means the stream died silently (no CMD_STOP sent).
+        // ── Update phone sport data FIRST ────────────────────────────
+        // Read 0x78 cumulative values before any writes so the current
+        // tick records fresh distance/steps, not the previous tick's.
+        if let rm = ringManager, rm.phoneSportActive {
+            sportSteps = rm.phoneSportSteps
+            sportDistanceM = Int(Double(rm.phoneSportDistanceM) * distanceCalibrationFactor)
+        }
+
+        // ── Determine best HR source ─────────────────────────────────
         let hrPacketAge = ringManager?.lastRealTimeHRPacketTime.map { now.timeIntervalSince($0) } ?? .infinity
         let dataFresh = hrPacketAge < 5.0
 
-        // When sport RT (0x73) is active the firmware monopolises the PPG
-        // sensor and the 0x69 HR stream goes silent.  Rather than showing
-        // "warming up" we hold the last known HR value — the user IS
-        // exercising (sport RT proves wrist contact) and the reading is
-        // still approximately correct.
         let sportRTAge = ringManager?.lastSportRTPacketTime.map { now.timeIntervalSince($0) } ?? .infinity
         let sportRTActive = sportRTAge < 5.0
 
-        if dataFresh, let rawBPM = ringManager?.realTimeHeartRateBPM, rawBPM > 0 {
-            // Apply cadence rejection filter (uses 0x78 step deltas to detect coupling)
+        // Prefer phoneSportHR (0x78) when available — it's the ring's own
+        // PPG-processed value (matches ring display).  During treadmill
+        // workouts, 0x69 often reads resting HR due to arm swing artefacts
+        // while 0x78 reads actual exercise HR.
+        let sportHR = ringManager?.phoneSportHR ?? 0
+        let rawHR69 = ringManager?.realTimeHeartRateBPM ?? 0
+        let usePhoneSportHR = sportHR > 0 && (ringManager?.phoneSportActive == true)
+
+        // Pick the HR source: 0x78 if active, else 0x69 if fresh.
+        let bestRawBPM: Int
+        let hrSourceLabel: String
+        if usePhoneSportHR {
+            bestRawBPM = sportHR
+            hrSourceLabel = "0x78"
+        } else if dataFresh && rawHR69 > 0 {
+            bestRawBPM = rawHR69
+            hrSourceLabel = "0x69"
+        } else if sportRTActive && sportHR > 0 {
+            // Sport RT (0x73) displaced 0x69 but phoneSportActive may be
+            // false if ring auto-ended sport.  Still use 0x78 HR if nonzero.
+            bestRawBPM = sportHR
+            hrSourceLabel = "0x78-rt"
+        } else {
+            bestRawBPM = 0
+            hrSourceLabel = "none"
+        }
+
+        if bestRawBPM > 0 {
             let filterResult = cadenceFilter.process(
-                rawBPM: rawBPM,
+                rawBPM: bestRawBPM,
                 cumulativeSteps: ringManager?.phoneSportSteps ?? 0,
                 timestamp: now
             )
@@ -401,7 +427,7 @@ class GymSessionManager {
                 // Write full telemetry tick to InfluxDB for post-hoc analysis
                 InfluxDBWriter.shared.writeWorkoutTick(
                     bpm: bpm,
-                    rawBPM: rawBPM,
+                    rawBPM: bestRawBPM,
                     cadenceSPM: filterResult.cadenceSPM,
                     distanceM: sportDistanceM,
                     steps: sportSteps,
@@ -412,64 +438,9 @@ class GymSessionManager {
                     time: now
                 )
             }
-        } else if sportRTActive {
-            // Sport RT (0x73) is flowing — the 0x69 HR stream is displaced.
-            // Use phoneSportHR (byte[5] of 0x78) as the HR source — this is
-            // the ring's own PPG reading, same value shown on the ring face.
-            // Route it through the cadence filter and write telemetry just
-            // like the 0x69 path so we don't lose workout data in InfluxDB.
-            let sportHR = ringManager?.phoneSportHR ?? 0
-            if sportHR > 0 {
-                let filterResult = cadenceFilter.process(
-                    rawBPM: sportHR,
-                    cumulativeSteps: ringManager?.phoneSportSteps ?? 0,
-                    timestamp: now
-                )
-                let bpm = filterResult.bpm
-                hrConfidence = filterResult.confidence
-                isCadenceFiltered = filterResult.wasCorrected
-                currentCadenceSPM = filterResult.cadenceSPM
 
-                currentBPM = bpm
-                let newZone = zoneConfig.zone(for: bpm)
-
-                if newZone != previousZone && hapticsEnabled {
-                    fireZoneHaptic(from: previousZone, to: newZone)
-                }
-
-                currentZone = newZone
-                previousZone = newZone
-
-                if bpm > peakBPM { peakBPM = bpm }
-
-                if lastSampleTime == nil || now.timeIntervalSince(lastSampleTime!) >= 0.9 {
-                    let sample = LiveHRSample(
-                        timestamp: now, bpm: bpm, zone: currentZone,
-                        cadenceFiltered: filterResult.wasCorrected,
-                        confidence: filterResult.confidence
-                    )
-                    samples.append(sample)
-                    lastSampleTime = now
-
-                    InfluxDBWriter.shared.writeWorkoutTick(
-                        bpm: bpm,
-                        rawBPM: sportHR,
-                        cadenceSPM: filterResult.cadenceSPM,
-                        distanceM: sportDistanceM,
-                        steps: sportSteps,
-                        confidence: filterResult.confidence,
-                        cadenceFiltered: filterResult.wasCorrected,
-                        zone: currentZone.label,
-                        sessionID: workoutSessionID,
-                        time: now
-                    )
-                }
-
-                tLog("[GymTick] phoneSportHR=\(sportHR) filtered=\(bpm) cadence=\(filterResult.cadenceSPM)SPM corrected=\(filterResult.wasCorrected) conf=\(String(format: "%.2f", filterResult.confidence))")
-            } else if currentBPM > 0 {
-                // No HR from 0x78 yet — hold last known value.
-            } else {
-                currentBPM = 0
+            if hrSourceLabel != "0x69" {
+                tLog("[GymTick] src=\(hrSourceLabel) hr=\(bestRawBPM) filtered=\(bpm) cadence=\(filterResult.cadenceSPM)SPM corrected=\(filterResult.wasCorrected) conf=\(String(format: "%.2f", filterResult.confidence))")
             }
         } else if currentBPM > 0 && hrPacketAge < 30.0 {
             // Stream just went silent but we had a valid reading recently.
@@ -543,11 +514,6 @@ class GymSessionManager {
             lastContinueKeepAliveTime = now
         }
 
-        // ── Phone sport data (0x78 notifications) ──────────────────
-        if let rm = ringManager, rm.phoneSportActive {
-            sportSteps = rm.phoneSportSteps
-            sportDistanceM = Int(Double(rm.phoneSportDistanceM) * distanceCalibrationFactor)
-        }
     }
 
     // MARK: - Haptics
