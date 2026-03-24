@@ -607,11 +607,18 @@ extension RingSessionManager: CBCentralManagerDelegate {
                     tLog("Found previously connected peripheral")
                     peripheral = known
                     peripheral?.delegate = self
-                    // Skip if a connect is already in-flight (e.g. foreground handler
-                    // called findRingAgain() before this delegate fired).
-                    if known.state == .connecting {
-                        tLog("[Connect] Already connecting — skipping duplicate connect")
+                    if known.state == .connected {
+                        tLog("[Connect] Already connected — discovering services")
+                        peripheralConnected = true
+                        known.discoverServices(nil)
                     } else {
+                        // Cancel any stale .connecting state from a restored session
+                        // (e.g. after factory reset the old bond is invalid and the
+                        // pending connect will never complete).
+                        if known.state == .connecting {
+                            tLog("[Connect] Cancelling stale .connecting state")
+                            central.cancelPeripheralConnection(known)
+                        }
                         connect()
                     }
                 } else {
@@ -2326,22 +2333,16 @@ extension RingSessionManager {
         keepalivePingCount += 1
 
         // Spot-check rotation: only start when sensor is idle.
-        // HR is well-covered by the ring's onboard 3-min logger (~20 readings/hour),
-        // so spot-checks alternate between SpO2 and temp to maximize their data density.
-        // SpO2 every 2nd ping (~2 min) with a 60s convergence window.
-        // Temp every 2nd ping (interleaved with SpO2) with a 20s window.
-        // HR spot-check every Nth ping to supplement the onboard logger.
+        // SpO2 every 10th ping (~10 min) with a 60s window; temperature every
+        // 3rd non-SpO2 ping; everything else is HR.
         if sensorState == .idle {
             let type: RealTimeReading
             if keepalivePingCount % RingConstants.spotCheckSpO2EveryNPings == 0 && keepalivePingCount > 0 {
                 type = .spo2
             } else if keepalivePingCount % RingConstants.spotCheckTempEveryNPings == 0 && keepalivePingCount > 0 {
                 type = .temperature
-            } else if keepalivePingCount % RingConstants.spotCheckHREveryNPings == 0 && keepalivePingCount > 0 {
-                type = .realtimeHeartRate
             } else {
-                // Default: alternate SpO2 and temp on remaining slots
-                type = keepalivePingCount % 2 == 0 ? .spo2 : .temperature
+                type = .realtimeHeartRate
             }
             startSpotCheck(type: type)
             // Don't schedule next keepalive now — it will be scheduled when

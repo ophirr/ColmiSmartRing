@@ -118,16 +118,11 @@ enum RingConstants {
 
     // MARK: - Spot-Check Rotation (modulo rules for keepalive-driven spot-checks)
 
-    /// SpO2 spot-check every Nth ping.
-    /// With 60s keepalive: every 3rd ping = ~3 min between SpO2 checks.
-    /// SpO2 takes 60s to converge, so effective cycle is ~2 min measure + 1 min gap.
-    static let spotCheckSpO2EveryNPings: Int      = 3
-    /// Temperature spot-check every Nth ping (interleaved with SpO2).
-    /// With 60s keepalive: every 2nd ping = ~2 min between temp checks.
-    static let spotCheckTempEveryNPings: Int      = 2
-    /// HR spot-check every Nth ping. HR is primarily covered by the ring's
-    /// onboard 3-min logger (~20 readings/hour), so spot-checks are supplemental.
-    static let spotCheckHREveryNPings: Int         = 5
+    /// SpO2 spot-check every Nth ping (~10 min with 60s keepalive).
+    /// SpO2 is the most expensive (60s window), so it runs least often.
+    static let spotCheckSpO2EveryNPings: Int      = 10
+    /// Temperature spot-check every Nth non-SpO2 ping.
+    static let spotCheckTempEveryNPings: Int      = 3
 
     // MARK: - BLE Scan & Connection
 
