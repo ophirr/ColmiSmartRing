@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSHealthShareUsageDescription</key>
-	<string>Biosense reads workout and heart rate data to avoid duplicates.</string>
+	<string>Biosense reads glucose and step count data from Apple Health to display alongside your ring data.</string>
 	<key>NSHealthUpdateUsageDescription</key>
 	<string>Biosense writes your sleep, activity, and workout data to Apple Health.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>

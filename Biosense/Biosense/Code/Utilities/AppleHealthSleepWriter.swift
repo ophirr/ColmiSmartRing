@@ -5,15 +5,10 @@ import HealthKit
 final class AppleHealthSleepWriter {
     private let base = HealthKitBase()
 
-    private static let shareTypes: Set<HKSampleType> = [
-        HKObjectType.categoryType(forIdentifier: .sleepAnalysis)!
-    ]
-
     func writeSleepDays(_ days: [SleepDay], todayStart: Date) async {
         guard HKHealthStore.isHealthDataAvailable() else { return }
         guard !days.isEmpty else { return }
         do {
-            try await base.authorize(toShare: Self.shareTypes)
             let samples = makeSamples(days: days, todayStart: todayStart)
             guard !samples.isEmpty else { return }
             try await base.saveSamples(samples)

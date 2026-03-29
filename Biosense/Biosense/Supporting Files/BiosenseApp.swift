@@ -10,6 +10,7 @@ import SwiftData
 struct BiosenseApp: App {
     @State private var ringSessionManager = RingSessionManager()
     @State private var ringDataPersistenceCoordinator: RingDataPersistenceCoordinator?
+    @State private var healthKitImporter: HealthKitImporter?
 
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
@@ -22,7 +23,10 @@ struct BiosenseApp: App {
             StoredStressSample.self,
             // Gym mode models
             StoredGymSession.self,
-            GymHRSample.self
+            GymHRSample.self,
+            // HealthKit-imported models
+            StoredGlucoseSample.self,
+            StoredPhoneStepSample.self
         ])
         let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
@@ -44,6 +48,15 @@ struct BiosenseApp: App {
                         coordinator.start()
                         ringDataPersistenceCoordinator = coordinator
                         tLog("[AutoPersist] RingDataPersistenceCoordinator started")
+                    }
+                    if healthKitImporter == nil {
+                        let importer = HealthKitImporter(modelContext: sharedModelContainer.mainContext)
+                        healthKitImporter = importer
+                        Task {
+                            // Single consolidated auth for all HealthKit types
+                            await HealthKitAuthorizer.shared.requestAuthorization()
+                            await importer.importAll()
+                        }
                     }
                 }
         }

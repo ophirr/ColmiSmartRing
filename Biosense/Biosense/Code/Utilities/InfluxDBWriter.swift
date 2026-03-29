@@ -265,6 +265,11 @@ final class InfluxDBWriter {
         write("activity,source=colmi_r02 steps=\(steps)i,calories=\(calories)i,distance_km=\(distanceKm) \(epochSeconds(time))")
     }
 
+    /// Write a glucose reading imported from HealthKit (e.g., Stelo CGM).
+    func writeGlucose(valueMgdl: Double, source: String, time: Date) {
+        write("glucose,source=\(source) value_mgdl=\(valueMgdl) \(epochSeconds(time))")
+    }
+
     /// Write historical sleep data. No activity tag — same rationale as writeActivity.
     func writeSleep(stage: String, durationMinutes: Int, time: Date) {
         write("sleep,source=colmi_r02,stage=\(stage) duration_min=\(durationMinutes)i \(epochSeconds(time))")
@@ -286,7 +291,13 @@ final class InfluxDBWriter {
         cadenceFiltered: Bool,
         zone: String,
         sessionID: String,
-        time: Date
+        time: Date,
+        slewDelta: Int = 0,
+        trendBPM: Int = 0,
+        filterReason: String = "clean",
+        hrSource: String = "unknown",
+        hrPacketAge: Double = 0,
+        crashGuardCount: Int = 0
     ) {
         let fields = [
             "bpm=\(bpm)i",
@@ -296,10 +307,60 @@ final class InfluxDBWriter {
             "steps=\(steps)i",
             "confidence=\(String(format: "%.2f", confidence))",
             "cadence_filtered=\(cadenceFiltered)",
+            "slew_delta=\(slewDelta)i",
+            "trend_bpm=\(trendBPM)i",
+            "hr_packet_age=\(String(format: "%.1f", hrPacketAge))",
+            "crash_guard_count=\(crashGuardCount)i",
         ].joined(separator: ",")
         // InfluxDB line protocol: spaces in tag values must be escaped with backslash
         let escapedZone = zone.replacingOccurrences(of: " ", with: "\\ ")
-        write("workout,source=colmi_r02,session_id=\(sessionID),zone=\(escapedZone) \(fields) \(epochSeconds(time))")
+        let escapedReason = filterReason.replacingOccurrences(of: " ", with: "\\ ")
+        let escapedSource = hrSource.replacingOccurrences(of: " ", with: "\\ ")
+        write("workout,source=colmi_r02,session_id=\(sessionID),zone=\(escapedZone),filter=\(escapedReason),hr_source=\(escapedSource) \(fields) \(epochSeconds(time))")
+    }
+
+    /// Write a Kalman-filtered workout telemetry tick (~1/sec during workouts).
+    /// Measurement: `workout` with Kalman-specific diagnostic fields.
+    func writeKalmanWorkoutTick(
+        bpm: Int,
+        rawBPM: Int,
+        cadenceSPM: Int,
+        distanceM: Int,
+        steps: Int,
+        confidence: Double,
+        zone: String,
+        sessionID: String,
+        time: Date,
+        filterReason: String = "clean",
+        hrSource: String = "unknown",
+        hrPacketAge: Double = 0,
+        kalmanGain: Double = 0,
+        innovationBPM: Double = 0,
+        measurementNoise: Double = 0,
+        hrRate: Double = 0,
+        stateUncertainty: Double = 0,
+        predictedBPM: Int = 0
+    ) {
+        let fields = [
+            "bpm=\(bpm)i",
+            "raw_bpm=\(rawBPM)i",
+            "cadence_spm=\(cadenceSPM)i",
+            "distance_m=\(distanceM)i",
+            "steps=\(steps)i",
+            "confidence=\(String(format: "%.2f", confidence))",
+            "cadence_filtered=\(filterReason != "clean")",
+            "hr_packet_age=\(String(format: "%.1f", hrPacketAge))",
+            "kalman_gain=\(String(format: "%.3f", kalmanGain))",
+            "innovation=\(String(format: "%.1f", innovationBPM))",
+            "measurement_noise=\(String(format: "%.1f", measurementNoise))",
+            "hr_rate=\(String(format: "%.2f", hrRate))",
+            "state_uncertainty=\(String(format: "%.1f", stateUncertainty))",
+            "predicted_bpm=\(predictedBPM)i",
+        ].joined(separator: ",")
+        let escapedZone = zone.replacingOccurrences(of: " ", with: "\\ ")
+        let escapedReason = filterReason.replacingOccurrences(of: " ", with: "\\ ")
+        let escapedSource = hrSource.replacingOccurrences(of: " ", with: "\\ ")
+        write("workout,source=colmi_r02,session_id=\(sessionID),zone=\(escapedZone),filter=\(escapedReason),hr_source=\(escapedSource),filter_type=kalman \(fields) \(epochSeconds(time))")
     }
 
     func writeBattery(level: Int, charging: Bool, time: Date) {

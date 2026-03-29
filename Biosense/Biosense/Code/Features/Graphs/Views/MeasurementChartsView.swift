@@ -396,6 +396,64 @@ struct StressChartView: View {
     }
 }
 
+// MARK: - Glucose (mg/dL, line chart with color zones)
+
+struct GlucoseChartView: View {
+    let data: [TimeSeriesPoint]
+    var title: String = "Glucose"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
+            Chart {
+                // Background zone bands
+                RectangleMark(yStart: .value("", 0), yEnd: .value("", 70))
+                    .foregroundStyle(.red.opacity(0.08))
+                RectangleMark(yStart: .value("", 70), yEnd: .value("", 100))
+                    .foregroundStyle(.green.opacity(0.08))
+                RectangleMark(yStart: .value("", 100), yEnd: .value("", 180))
+                    .foregroundStyle(.yellow.opacity(0.08))
+                RectangleMark(yStart: .value("", 180), yEnd: .value("", 300))
+                    .foregroundStyle(.red.opacity(0.08))
+                // Data
+                ForEach(data) { point in
+                    LineMark(
+                        x: .value("Time", point.time),
+                        y: .value("mg/dL", point.value)
+                    )
+                    .interpolationMethod(.catmullRom)
+                    .foregroundStyle(Color.purple.gradient)
+                    PointMark(
+                        x: .value("Time", point.time),
+                        y: .value("mg/dL", point.value)
+                    )
+                    .symbolSize(16)
+                    .foregroundStyle(glucosePointColor(point.value))
+                }
+            }
+            .chartXAxis {
+                AxisMarks(values: .stride(by: .hour, count: 4)) { _ in
+                    AxisValueLabel(format: .dateTime.hour())
+                }
+            }
+            .chartYAxis { AxisMarks(position: .leading) }
+            .frame(height: 200)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func glucosePointColor(_ value: Double) -> Color {
+        switch value {
+        case ..<70:  return .red
+        case 70..<100: return .green
+        case 100..<180: return .yellow
+        default: return .red
+        }
+    }
+}
+
 // MARK: - Previews
 
 #Preview("Activity – Steps") {

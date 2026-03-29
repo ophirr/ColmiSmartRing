@@ -16,8 +16,6 @@ import HealthKit
 @MainActor
 final class AppleHealthGymWriter {
     private let healthStore = HKHealthStore()
-    private var didRequestAuthorization = false
-
     /// Write a completed gym session to HealthKit.
     /// Call this when the user taps "Save" after stopping a workout.
     func writeGymSession(_ session: StoredGymSession) async {
@@ -27,8 +25,6 @@ final class AppleHealthGymWriter {
         }
 
         do {
-            try await requestAuthorizationIfNeeded()
-
             // 1. Build and save the workout
             let workout = try await saveWorkout(session)
             tLog("[HealthKit/Gym] Workout saved: \(workout.uuid)")
@@ -42,36 +38,6 @@ final class AppleHealthGymWriter {
 
         } catch {
             tLog("[HealthKit/Gym] Failed to write: \(error)")
-        }
-    }
-
-    // MARK: - Authorization
-
-    private func requestAuthorizationIfNeeded() async throws {
-        guard !didRequestAuthorization else { return }
-
-        let workoutType = HKObjectType.workoutType()
-        let heartRateType = HKObjectType.quantityType(forIdentifier: .heartRate)!
-        let energyType = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned)!
-
-        // Types we want to write
-        let shareTypes: Set<HKSampleType> = [workoutType, heartRateType, energyType]
-        // Types we want to read (for deduplication checks if needed later)
-        let readTypes: Set<HKObjectType> = [workoutType, heartRateType]
-
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            healthStore.requestAuthorization(toShare: shareTypes, read: readTypes) { [weak self] success, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                guard success else {
-                    continuation.resume(throwing: HealthGymError.authorizationDenied)
-                    return
-                }
-                self?.didRequestAuthorization = true
-                continuation.resume(returning: ())
-            }
         }
     }
 

@@ -4,10 +4,13 @@ import SleepChartKit
 
 struct HomeScreenView: View {
     @Bindable var ringSessionManager: RingSessionManager
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \StoredSleepDay.syncDate, order: .reverse) private var storedSleepDays: [StoredSleepDay]
     @Query(sort: \StoredHeartRateLog.timestamp, order: .reverse) private var storedHeartRateLogs: [StoredHeartRateLog]
     @Query(sort: \StoredActivitySample.timestamp, order: .reverse) private var storedActivitySamples: [StoredActivitySample]
     @Query(sort: \StoredGymSession.startTime, order: .reverse) private var storedGymSessions: [StoredGymSession]
+    @Query(sort: \StoredGlucoseSample.timestamp, order: .reverse) private var storedGlucoseSamples: [StoredGlucoseSample]
+    @Query(sort: \StoredPhoneStepSample.timestamp, order: .reverse) private var storedPhoneStepSamples: [StoredPhoneStepSample]
 
     private var latestSleepDurationMinutes: Int? {
         storedSleepDays.first.map { $0.toSleepDay().totalDurationMinutes }
@@ -21,16 +24,43 @@ struct HomeScreenView: View {
         return valid.reduce(0, +) / valid.count
     }
 
+    /// Latest glucose reading within the last 4 hours (nil if no recent data).
+    private var latestGlucose: Double? {
+        storedGlucoseSamples.first(where: {
+            Date().timeIntervalSince($0.timestamp) < 4 * 3600
+        })?.valueMgdl
+    }
+
     private var latestActivity: (steps: Int, distanceKm: Double, calories: Int, label: String)? {
-        let todaySamples = storedActivitySamples.filter { Calendar.current.isDateInToday($0.timestamp) }
-        let todayGymSessions = storedGymSessions.filter { Calendar.current.isDateInToday($0.startTime) }
-        guard !todaySamples.isEmpty || !todayGymSessions.isEmpty else { return nil }
-        let totalSteps = todaySamples.reduce(0) { $0 + $1.steps }
-        let totalDistanceKm = todaySamples.reduce(0.0) { $0 + $1.distanceKm }
-        let ringCalories = todaySamples.reduce(0) { $0 + $1.calories }
-        // Add estimated gym calories (HR-based) to the ring's step-derived calories.
+        let calendar = Calendar.current
+        let todayRingSamples = storedActivitySamples.filter { calendar.isDateInToday($0.timestamp) }
+        let todayPhoneSamples = storedPhoneStepSamples.filter { calendar.isDateInToday($0.timestamp) }
+        let todayGymSessions = storedGymSessions.filter { calendar.isDateInToday($0.startTime) }
+        guard !todayRingSamples.isEmpty || !todayPhoneSamples.isEmpty || !todayGymSessions.isEmpty else { return nil }
+
+        // Merge activity: take the higher value per hourly bucket (ring vs phone) for each metric
+        let ringByHour = Dictionary(grouping: todayRingSamples) { calendar.component(.hour, from: $0.timestamp) }
+        let phoneByHour = Dictionary(grouping: todayPhoneSamples) { calendar.component(.hour, from: $0.timestamp) }
+        let allHours = Set(ringByHour.keys).union(phoneByHour.keys)
+        var totalSteps = 0
+        var totalDistanceKm = 0.0
+        var totalCalories = 0
+        for hour in allHours {
+            let ringSteps = ringByHour[hour]?.reduce(0) { $0 + $1.steps } ?? 0
+            let phoneSteps = phoneByHour[hour]?.reduce(0) { $0 + $1.steps } ?? 0
+            totalSteps += max(ringSteps, phoneSteps)
+
+            let ringDist = ringByHour[hour]?.reduce(0.0) { $0 + $1.distanceKm } ?? 0
+            let phoneDist = phoneByHour[hour]?.reduce(0.0) { $0 + $1.distanceKm } ?? 0
+            totalDistanceKm += max(ringDist, phoneDist)
+
+            let ringCal = ringByHour[hour]?.reduce(0) { $0 + $1.calories } ?? 0
+            let phoneCal = phoneByHour[hour]?.reduce(0) { $0 + $1.calories } ?? 0
+            totalCalories += max(ringCal, phoneCal)
+        }
+
         let gymCalories = todayGymSessions.reduce(0) { $0 + $1.estimatedCalories }
-        let totalCalories = ringCalories + gymCalories
+        totalCalories += gymCalories
         return (totalSteps, totalDistanceKm, totalCalories, "")
     }
 
@@ -77,7 +107,8 @@ struct HomeScreenView: View {
                         gymWorkoutCount: todayGymWorkoutCount,
                         gymDurationMinutes: todayGymDurationMinutes,
                         spo2Percent: ringSessionManager.realTimeBloodOxygenPercent,
-                        temperatureCelsius: ringSessionManager.realTimeTemperatureCelsius
+                        temperatureCelsius: ringSessionManager.realTimeTemperatureCelsius,
+                        glucoseMgdl: latestGlucose
                     )
                 }
                 Section(L10n.Sleep.sectionTitle) {
@@ -111,9 +142,20 @@ struct HomeScreenView: View {
         }
     }
 
-    /// Pull-to-refresh: re-request today's data for all metrics from the ring.
+    /// Pull-to-refresh: re-request today's data from ring + HealthKit.
     private func refreshHomeData() async {
-        guard ringSessionManager.peripheralConnected else { return }
+        // Import from HealthKit in background (don't block the spinner)
+        let ctx = modelContext
+        Task {
+            let importer = HealthKitImporter(modelContext: ctx)
+            await importer.importAll()
+        }
+
+        guard ringSessionManager.peripheralConnected else {
+            // Brief pause so the spinner doesn't flash and vanish instantly
+            try? await Task.sleep(for: .seconds(1))
+            return
+        }
         ringSessionManager.getHeartRateLog(dayOffset: 0) { _ in }
         ringSessionManager.syncActivityData(dayOffset: 0)
         ringSessionManager.requestTodaySports()
@@ -170,7 +212,9 @@ struct HomeScreenView: View {
                 StoredHeartRateLog.self,
                 StoredActivitySample.self,
                 StoredGymSession.self,
-                GymHRSample.self
+                GymHRSample.self,
+                StoredGlucoseSample.self,
+                StoredPhoneStepSample.self
             ],
             inMemory: true
         )

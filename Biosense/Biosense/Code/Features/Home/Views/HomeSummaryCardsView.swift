@@ -34,6 +34,8 @@ struct HomeSummaryCardsView: View {
     var spo2Percent: Int?
     /// Latest temperature reading in Celsius (nil if no data).
     var temperatureCelsius: Double?
+    /// Latest glucose reading in mg/dL (nil if no data).
+    var glucoseMgdl: Double?
 
     var body: some View {
         VStack(spacing: 12) {
@@ -45,6 +47,12 @@ struct HomeSummaryCardsView: View {
             HStack(spacing: 12) {
                 spo2Card
                 temperatureCard
+            }
+            if glucoseMgdl != nil {
+                HStack(spacing: 12) {
+                    glucoseCard
+                    Spacer()
+                }
             }
         }
         .padding(.vertical, 4)
@@ -207,6 +215,47 @@ struct HomeSummaryCardsView: View {
         .biosenseCardStyle()
     }
 
+    private var glucoseCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Glucose", systemImage: "drop.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if let glucose = glucoseMgdl {
+                Text("\(Int(glucose)) mg/dL")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(glucoseColor(glucose))
+                    .contentTransition(.numericText())
+                    .animation(.easeInOut(duration: 0.3), value: glucose)
+                Text(glucoseLabel(glucose))
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else {
+                Text(L10n.HomeSummary.noData)
+                    .font(.subheadline)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .biosenseCardStyle()
+    }
+
+    private func glucoseColor(_ value: Double) -> Color {
+        switch value {
+        case ..<70:  return .red
+        case 70..<100: return .green
+        case 100..<180: return .yellow
+        default: return .red
+        }
+    }
+
+    private func glucoseLabel(_ value: Double) -> String {
+        switch value {
+        case ..<70:  return "low"
+        case 70..<100: return "normal"
+        case 100..<180: return "elevated"
+        default: return "high"
+        }
+    }
+
     private func metricCell(value: String, unit: String, color: Color) -> some View {
         VStack(spacing: 4) {
             Text(value)
@@ -231,7 +280,8 @@ extension HomeSummaryCardsView {
         heartRateAverage: Int? = nil,
         currentBPM: Int? = nil,
         spo2Percent: Int? = nil,
-        temperatureCelsius: Double? = nil
+        temperatureCelsius: Double? = nil,
+        glucoseMgdl: Double? = nil
     ) -> HomeSummaryCardsView {
         let activity = PreviewData.activitySummary
         return HomeSummaryCardsView(
@@ -243,7 +293,8 @@ extension HomeSummaryCardsView {
             calories: activity.calories,
             activityLabel: activity.label,
             spo2Percent: spo2Percent,
-            temperatureCelsius: temperatureCelsius
+            temperatureCelsius: temperatureCelsius,
+            glucoseMgdl: glucoseMgdl
         )
     }
 }
@@ -258,5 +309,5 @@ extension HomeSummaryCardsView {
         }
     }
     .listStyle(.insetGrouped)
-    .modelContainer(for: [StoredSleepDay.self, StoredHeartRateLog.self], inMemory: true)
+    .modelContainer(for: [StoredSleepDay.self, StoredHeartRateLog.self, StoredGlucoseSample.self, StoredPhoneStepSample.self], inMemory: true)
 }

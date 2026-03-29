@@ -225,3 +225,35 @@ final class StoredStressSample {
         self.value = value
     }
 }
+
+// MARK: - HealthKit-imported samples
+
+/// Glucose reading imported from HealthKit (e.g., Stelo CGM).
+@Model
+final class StoredGlucoseSample {
+    var timestamp: Date
+    var valueMgdl: Double
+    var sourceBundle: String
+
+    init(timestamp: Date, valueMgdl: Double, sourceBundle: String) {
+        self.timestamp = timestamp
+        self.valueMgdl = valueMgdl
+        self.sourceBundle = sourceBundle
+    }
+}
+
+/// Phone activity imported from HealthKit (iPhone pedometer).
+@Model
+final class StoredPhoneStepSample {
+    var timestamp: Date   // start of hour bucket
+    var steps: Int
+    var distanceKm: Double = 0
+    var calories: Int = 0
+
+    init(timestamp: Date, steps: Int, distanceKm: Double = 0, calories: Int = 0) {
+        self.timestamp = timestamp
+        self.steps = steps
+        self.distanceKm = distanceKm
+        self.calories = calories
+    }
+}

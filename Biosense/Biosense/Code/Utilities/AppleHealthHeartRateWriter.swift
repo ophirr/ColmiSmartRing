@@ -7,13 +7,6 @@ import HealthKit
 final class AppleHealthHeartRateWriter {
     private let base = HealthKitBase()
 
-    private static let shareTypes: Set<HKSampleType> = [
-        HKQuantityType.quantityType(forIdentifier: .heartRate)!,
-        HKQuantityType.quantityType(forIdentifier: .oxygenSaturation)!,
-        HKQuantityType.quantityType(forIdentifier: .bodyTemperature)!,
-        HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN)!,
-    ]
-
     // MARK: - Single-reading writes (spot-checks / real-time)
 
     /// Write a single heart rate reading to HealthKit.
@@ -22,7 +15,7 @@ final class AppleHealthHeartRateWriter {
         guard bpm > 0, bpm <= 220 else { return }
 
         do {
-            try await base.authorize(toShare: Self.shareTypes)
+
             let hrType = HKQuantityType.quantityType(forIdentifier: .heartRate)!
             let unit = HKUnit.count().unitDivided(by: .minute())
             let sample = HKQuantitySample(
@@ -44,7 +37,7 @@ final class AppleHealthHeartRateWriter {
         guard percent > 0, percent <= 100 else { return }
 
         do {
-            try await base.authorize(toShare: Self.shareTypes)
+
             let spo2Type = HKQuantityType.quantityType(forIdentifier: .oxygenSaturation)!
             let sample = HKQuantitySample(
                 type: spo2Type,
@@ -65,7 +58,7 @@ final class AppleHealthHeartRateWriter {
         guard celsius > 30.0, celsius < 45.0 else { return }
 
         do {
-            try await base.authorize(toShare: Self.shareTypes)
+
             let tempType = HKQuantityType.quantityType(forIdentifier: .bodyTemperature)!
             let sample = HKQuantitySample(
                 type: tempType,
@@ -88,7 +81,7 @@ final class AppleHealthHeartRateWriter {
         guard !valid.isEmpty, HKHealthStore.isHealthDataAvailable() else { return }
 
         do {
-            try await base.authorize(toShare: Self.shareTypes)
+
             let hrType = HKQuantityType.quantityType(forIdentifier: .heartRate)!
             let unit = HKUnit.count().unitDivided(by: .minute())
             let samples = valid.map { reading in
@@ -112,7 +105,7 @@ final class AppleHealthHeartRateWriter {
         guard !valid.isEmpty, HKHealthStore.isHealthDataAvailable() else { return }
 
         do {
-            try await base.authorize(toShare: Self.shareTypes)
+
             let spo2Type = HKQuantityType.quantityType(forIdentifier: .oxygenSaturation)!
             let samples = valid.map { reading in
                 HKQuantitySample(
@@ -135,7 +128,7 @@ final class AppleHealthHeartRateWriter {
         guard !valid.isEmpty, HKHealthStore.isHealthDataAvailable() else { return }
 
         do {
-            try await base.authorize(toShare: Self.shareTypes)
+
             let hrvType = HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN)!
             let unit = HKUnit.secondUnit(with: .milli)
             let samples = valid.map { reading in

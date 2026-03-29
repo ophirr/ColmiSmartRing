@@ -5,17 +5,11 @@ import HealthKit
 final class AppleHealthActivityWriter {
     private let base = HealthKitBase()
 
-    private static let shareTypes: Set<HKSampleType> = [
-        HKQuantityType.quantityType(forIdentifier: .stepCount)!,
-        HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)!,
-    ]
-
     func writeActivitySample(timestamp: Date, steps: Int, calories: Int) async {
         guard HKHealthStore.isHealthDataAvailable() else { return }
         guard steps > 0 || calories > 0 else { return }
 
         do {
-            try await base.authorize(toShare: Self.shareTypes)
             let samples = makeSamples(timestamp: timestamp, steps: steps, calories: calories)
             guard !samples.isEmpty else { return }
             try await base.saveSamples(samples)
