@@ -66,17 +66,15 @@ struct SleepDay: Sendable {
     let sleepEnd: Int16
     let periods: [SleepPeriod]
 
-    /// Time in bed in minutes derived from sleepStart/sleepEnd (handles overnight: end < start).
+    /// Time in bed in minutes (sum of all period durations).
+    /// Note: sleepStart/sleepEnd are UTC clock times for display only — the period
+    /// sum is the authoritative duration since the start/end overnight arithmetic
+    /// breaks when both values fall on the same side of midnight in UTC.
     var totalDurationMinutes: Int {
-        let start = Int(sleepStart)
-        let end = Int(sleepEnd)
-        if end <= start {
-            return (24 * 60 - start) + end
-        }
-        return end - start
+        periods.reduce(0) { $0 + Int($1.minutes) }
     }
 
-    /// Time asleep in minutes (time in bed minus awake stage minutes).
+    /// Time asleep in minutes (total minus awake stage minutes).
     var timeAsleepMinutes: Int {
         let awakeMinutes = periods.reduce(0) { partial, period in
             partial + (period.type == .awake ? Int(period.minutes) : 0)
@@ -131,7 +129,6 @@ enum BigDataSleepParser {
             guard offset + 2 <= bytes.count else { break }
             let daysAgo = bytes[offset]
             let curDayBytes = bytes[offset + 1]
-            let dayStart = offset
             let dayPayloadStart = offset + 2
             let dayPayloadLen = Int(curDayBytes)
             let dayPayloadEnd = dayPayloadStart + dayPayloadLen
@@ -148,7 +145,11 @@ enum BigDataSleepParser {
                 let typeRaw = bytes[offset]
                 let minutes = bytes[offset + 1]
                 offset += 2
-                periods.append(SleepPeriod(type: SleepType(rawValue: typeRaw) ?? .noData, minutes: minutes))
+                let type = SleepType(rawValue: typeRaw) ?? .noData
+                // The ring pads unused slots with type=0 (noData) / 255 min.
+                // Skip these so they don't inflate duration or chart data.
+                guard type != .noData && type != .error else { continue }
+                periods.append(SleepPeriod(type: type, minutes: minutes))
             }
 
             // Skip any padding/unknown trailing bytes declared by curDayBytes.

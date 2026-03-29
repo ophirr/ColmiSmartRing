@@ -48,21 +48,22 @@ final class RingDataPersistenceCoordinator {
             let existing = (try? modelContext.fetch(descriptor))?.first
             if let existingDay = existing {
                 updatedDays += 1
-                existingDay.daysAgo = daysAgo
-                existingDay.sleepStart = Int(day.sleepStart)
-                existingDay.sleepEnd = Int(day.sleepEnd)
-                existingDay.syncDate = Date()
-                existingDay.nightDate = nightDate
-                for period in existingDay.periods {
-                    modelContext.delete(period)
-                }
-                existingDay.periods = []
-                let newPeriods = makeStoredPeriods(from: day, nightDate: nightDate)
-                for period in newPeriods {
-                    period.day = existingDay
-                    modelContext.insert(period)
-                    existingDay.periods.append(period)
-                }
+                // Delete the entire record and recreate it. Updating periods
+                // in-place is unreliable — SwiftData can resurrect deleted
+                // relationship objects within the same transaction, causing
+                // period accumulation across syncs.
+                modelContext.delete(existingDay)
+                try? modelContext.save()
+                let storedPeriods = makeStoredPeriods(from: day, nightDate: nightDate)
+                let replacementDay = StoredSleepDay(
+                    daysAgo: daysAgo,
+                    sleepStart: Int(day.sleepStart),
+                    sleepEnd: Int(day.sleepEnd),
+                    syncDate: Date(),
+                    nightDate: nightDate,
+                    periods: storedPeriods
+                )
+                modelContext.insert(replacementDay)
             } else {
                 insertedDays += 1
                 let storedPeriods = makeStoredPeriods(from: day, nightDate: nightDate)
