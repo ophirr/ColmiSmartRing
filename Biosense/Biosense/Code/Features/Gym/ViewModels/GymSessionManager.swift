@@ -92,16 +92,25 @@ class GymSessionManager {
     /// True when the ring is connected and streaming HR data.
     var isReceivingData: Bool { currentBPM > 0 }
 
-    // MARK: - Cadence Rejection Filter
+    // MARK: - HR Filter
 
     /// Current filter confidence (1.0 = clean reading, <0.5 = corrected/uncertain).
     var hrConfidence: Double = 1.0
-    /// Whether the filter is currently correcting a cadence-coupled reading.
+    /// Whether the filter is currently correcting a reading.
     var isCadenceFiltered: Bool = false
     /// Current running cadence in SPM (from 0x78 step deltas).
     var currentCadenceSPM: Int = 0
 
-    private var cadenceFilter = CadenceRejectionFilter()
+    /// When true, use the Kalman filter instead of the heuristic filter.
+    /// Toggle in Settings or via UserDefaults key "gym_use_kalman_filter".
+    var useKalmanFilter: Bool {
+        didSet {
+            UserDefaults.standard.set(useKalmanFilter, forKey: Self.kalmanFilterKey)
+        }
+    }
+
+    private var hrFilter = WorkoutHRFilter()
+    private var kalmanFilter = KalmanHRFilter()
 
     // MARK: - Private
 
@@ -109,6 +118,7 @@ class GymSessionManager {
     private static let ringFingerKey = AppSettings.Gym.ringFinger
     private static let hapticsKey = AppSettings.Gym.hapticsEnabled
     private static let distanceCalibrationKey = AppSettings.Gym.distanceCalibrationFactor
+    private static let kalmanFilterKey = "gym_use_kalman_filter"
     private static let hrPollInterval: TimeInterval = 1.0
 
     /// Aggressive watchdog: the ring's firmware silently stops 0x69 packets
@@ -178,6 +188,13 @@ class GymSessionManager {
         // Load distance calibration factor (0.0 = never set → default 1.0)
         let savedCal = UserDefaults.standard.double(forKey: Self.distanceCalibrationKey)
         self.distanceCalibrationFactor = savedCal > 0 ? savedCal : 1.0
+
+        // Load Kalman filter preference (default: enabled)
+        if UserDefaults.standard.object(forKey: Self.kalmanFilterKey) != nil {
+            self.useKalmanFilter = UserDefaults.standard.bool(forKey: Self.kalmanFilterKey)
+        } else {
+            self.useKalmanFilter = true
+        }
 
         // Pre-warm haptic engines
         hapticEngine.prepare()
@@ -265,11 +282,21 @@ class GymSessionManager {
         continueTask = nil
         workoutState = .finished
 
-        // Log cadence filter stats
-        let total = cadenceFilter.totalReadings
-        let flagged = cadenceFilter.flaggedReadings
-        let pct = total > 0 ? String(format: "%.1f%%", Double(flagged) / Double(total) * 100) : "0%"
-        tLog("[Gym] Cadence filter — total=\(total) flagged=\(flagged) (\(pct))")
+        // Log HR filter stats
+        if useKalmanFilter {
+            let total = kalmanFilter.totalReadings
+            let corrected = kalmanFilter.correctedReadings
+            let pct = total > 0 ? String(format: "%.1f%%", Double(corrected) / Double(total) * 100) : "0%"
+            tLog("[Gym] Kalman HR filter — total=\(total) corrected=\(corrected) (\(pct)) "
+                 + "high_noise=\(kalmanFilter.highNoiseReadings)")
+        } else {
+            let total = hrFilter.totalReadings
+            let corrected = hrFilter.correctedReadings
+            let pct = total > 0 ? String(format: "%.1f%%", Double(corrected) / Double(total) * 100) : "0%"
+            tLog("[Gym] HR filter — total=\(total) corrected=\(corrected) (\(pct)) "
+                 + "slew=\(hrFilter.slewLimitedCount) harmonic=\(hrFilter.harmonicCorrectedCount) "
+                 + "crash_guard=\(hrFilter.crashGuardedCount)")
+        }
 
         // End phone sport mode (0x77) — must be sent before exitWorkoutMode
         // so the ring finalizes sport data while still connected.
@@ -391,15 +418,135 @@ class GymSessionManager {
         }
 
         if bestRawBPM > 0 {
-            let filterResult = cadenceFilter.process(
-                rawBPM: bestRawBPM,
-                cumulativeSteps: ringManager?.phoneSportSteps ?? 0,
-                timestamp: now
-            )
-            let bpm = filterResult.bpm
-            hrConfidence = filterResult.confidence
-            isCadenceFiltered = filterResult.wasCorrected
-            currentCadenceSPM = filterResult.cadenceSPM
+            let bpm: Int
+            let confidence: Double
+            let wasCorrected: Bool
+            let cadenceSPM: Int
+
+            if useKalmanFilter {
+                // --- Kalman filter path ---
+                let source: KalmanHRFilter.HRSource = {
+                    switch hrSourceLabel {
+                    case "0x78":    return .phoneSport0x78
+                    case "0x69":    return .realtime0x69
+                    case "0x78-rt": return .sportRT0x73
+                    default:        return .none
+                    }
+                }()
+
+                if let kr = kalmanFilter.process(
+                    rawBPM: bestRawBPM,
+                    cumulativeSteps: ringManager?.phoneSportSteps ?? 0,
+                    source: source,
+                    packetAge: hrPacketAge,
+                    timestamp: now
+                ) {
+                    bpm = kr.bpm
+                    confidence = kr.confidence
+                    wasCorrected = kr.wasCorrected
+                    cadenceSPM = kr.cadenceSPM
+
+                    hrConfidence = confidence
+                    isCadenceFiltered = wasCorrected
+                    currentCadenceSPM = cadenceSPM
+
+                    // Record sample (~1 per second)
+                    if lastSampleTime == nil || now.timeIntervalSince(lastSampleTime!) >= 0.9 {
+                        let sample = LiveHRSample(
+                            timestamp: now, bpm: bpm, zone: zoneConfig.zone(for: bpm),
+                            cadenceFiltered: wasCorrected,
+                            confidence: confidence
+                        )
+                        samples.append(sample)
+                        lastSampleTime = now
+
+                        InfluxDBWriter.shared.writeKalmanWorkoutTick(
+                            bpm: bpm,
+                            rawBPM: bestRawBPM,
+                            cadenceSPM: cadenceSPM,
+                            distanceM: sportDistanceM,
+                            steps: sportSteps,
+                            confidence: confidence,
+                            zone: zoneConfig.zone(for: bpm).label,
+                            sessionID: workoutSessionID,
+                            time: now,
+                            filterReason: kr.filterReason,
+                            hrSource: hrSourceLabel,
+                            hrPacketAge: hrPacketAge,
+                            kalmanGain: kr.kalmanGain,
+                            innovationBPM: kr.innovationBPM,
+                            measurementNoise: kr.measurementNoise,
+                            hrRate: kr.hrRate,
+                            stateUncertainty: kr.stateUncertainty,
+                            predictedBPM: kr.predictedBPM
+                        )
+                    }
+
+                    if hrSourceLabel != "0x69" {
+                        tLog("[GymTick-K] src=\(hrSourceLabel) raw=\(bestRawBPM) kalman=\(bpm) "
+                             + "gain=\(String(format: "%.2f", kr.kalmanGain)) "
+                             + "innov=\(String(format: "%.0f", kr.innovationBPM)) "
+                             + "R=\(String(format: "%.0f", kr.measurementNoise)) "
+                             + "reason=\(kr.filterReason)")
+                    }
+                } else {
+                    bpm = 0
+                    confidence = 0
+                    wasCorrected = false
+                    cadenceSPM = 0
+                }
+            } else {
+                // --- Heuristic filter path (original) ---
+                let filterResult = hrFilter.process(
+                    rawBPM: bestRawBPM,
+                    cumulativeSteps: ringManager?.phoneSportSteps ?? 0,
+                    timestamp: now
+                )
+                bpm = filterResult.bpm
+                confidence = filterResult.confidence
+                wasCorrected = filterResult.wasCorrected
+                cadenceSPM = filterResult.cadenceSPM
+
+                hrConfidence = confidence
+                isCadenceFiltered = wasCorrected
+                currentCadenceSPM = cadenceSPM
+
+                // Record sample (~1 per second)
+                if lastSampleTime == nil || now.timeIntervalSince(lastSampleTime!) >= 0.9 {
+                    let sample = LiveHRSample(
+                        timestamp: now, bpm: bpm, zone: zoneConfig.zone(for: bpm),
+                        cadenceFiltered: wasCorrected,
+                        confidence: confidence
+                    )
+                    samples.append(sample)
+                    lastSampleTime = now
+
+                    InfluxDBWriter.shared.writeWorkoutTick(
+                        bpm: bpm,
+                        rawBPM: bestRawBPM,
+                        cadenceSPM: cadenceSPM,
+                        distanceM: sportDistanceM,
+                        steps: sportSteps,
+                        confidence: confidence,
+                        cadenceFiltered: wasCorrected,
+                        zone: zoneConfig.zone(for: bpm).label,
+                        sessionID: workoutSessionID,
+                        time: now,
+                        slewDelta: filterResult.slewDelta,
+                        trendBPM: filterResult.trendBPM,
+                        filterReason: filterResult.filterReason,
+                        hrSource: hrSourceLabel,
+                        hrPacketAge: hrPacketAge,
+                        crashGuardCount: filterResult.crashGuardCount
+                    )
+                }
+
+                if hrSourceLabel != "0x69" {
+                    tLog("[GymTick] src=\(hrSourceLabel) hr=\(bestRawBPM) filtered=\(bpm) "
+                         + "cadence=\(cadenceSPM)SPM corrected=\(wasCorrected) "
+                         + "conf=\(String(format: "%.2f", confidence))")
+                }
+            }
 
             currentBPM = bpm
             let newZone = zoneConfig.zone(for: bpm)
@@ -413,35 +560,6 @@ class GymSessionManager {
             previousZone = newZone
 
             if bpm > peakBPM { peakBPM = bpm }
-
-            // Record sample (~1 per second)
-            if lastSampleTime == nil || now.timeIntervalSince(lastSampleTime!) >= 0.9 {
-                let sample = LiveHRSample(
-                    timestamp: now, bpm: bpm, zone: currentZone,
-                    cadenceFiltered: filterResult.wasCorrected,
-                    confidence: filterResult.confidence
-                )
-                samples.append(sample)
-                lastSampleTime = now
-
-                // Write full telemetry tick to InfluxDB for post-hoc analysis
-                InfluxDBWriter.shared.writeWorkoutTick(
-                    bpm: bpm,
-                    rawBPM: bestRawBPM,
-                    cadenceSPM: filterResult.cadenceSPM,
-                    distanceM: sportDistanceM,
-                    steps: sportSteps,
-                    confidence: filterResult.confidence,
-                    cadenceFiltered: filterResult.wasCorrected,
-                    zone: currentZone.label,
-                    sessionID: workoutSessionID,
-                    time: now
-                )
-            }
-
-            if hrSourceLabel != "0x69" {
-                tLog("[GymTick] src=\(hrSourceLabel) hr=\(bestRawBPM) filtered=\(bpm) cadence=\(filterResult.cadenceSPM)SPM corrected=\(filterResult.wasCorrected) conf=\(String(format: "%.2f", filterResult.confidence))")
-            }
         } else if currentBPM > 0 && hrPacketAge < 30.0 {
             // Stream just went silent but we had a valid reading recently.
             // Hold the last known HR for up to 30 s while the watchdog
@@ -585,7 +703,8 @@ class GymSessionManager {
         watchdogFired = false
         lastWatchdogRestartTime = nil
         lastContinueKeepAliveTime = nil
-        cadenceFilter.reset()
+        hrFilter.reset()
+        kalmanFilter.reset()
         hrConfidence = 1.0
         isCadenceFiltered = false
         currentCadenceSPM = 0

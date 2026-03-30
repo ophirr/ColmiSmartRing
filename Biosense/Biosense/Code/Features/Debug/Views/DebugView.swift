@@ -18,6 +18,7 @@ struct DebugView: View {
     @State private var payloadHex = ""
     @AppStorage("debugByteFormat") private var byteFormat: DebugByteFormat = .hex
 
+
     private var commandValue: UInt8? {
         guard let n = Int(commandText.trimmingCharacters(in: .whitespaces)), n >= 0, n <= 255 else { return nil }
         return UInt8(n)
@@ -67,7 +68,7 @@ struct DebugView: View {
                     .disabled(commandValue == nil || (payloadHex.isEmpty == false && payloadBytes == nil) || !ringSessionManager.peripheralConnected)
                 }
 
-                Section("Raw Sensor Streaming (0xA1)") {
+Section("Raw Sensor Streaming (0xA1)") {
                     Button {
                         if ringSessionManager.rawSensorStreamActive {
                             ringSessionManager.stopRawSensorStream()
@@ -180,6 +181,7 @@ struct DebugView: View {
             ringSessionManager.sendDebugCommand(command: cmd, subData: payload)
         }
     }
+
 
     private func bytesFormatted(_ bytes: [UInt8]) -> String {
         switch byteFormat {

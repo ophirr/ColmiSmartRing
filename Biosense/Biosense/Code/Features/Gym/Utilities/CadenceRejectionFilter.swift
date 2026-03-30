@@ -23,6 +23,29 @@ struct CadenceFilterResult {
     let cadenceSPM: Int
     /// Which harmonic matched, if any.
     let harmonicMatch: CadenceHarmonicMatch
+    /// How many BPM the slew-rate limiter clamped (0 = no clamping).
+    let slewDelta: Int
+    /// The filter's recent trend estimate (median of recent outputs). 0 if insufficient data.
+    let trendBPM: Int
+    /// Why the filter corrected: "clean", "slew", "crash_guard", or "both".
+    let filterReason: String
+    /// How many consecutive ticks the crash guard has been holding (0 = not active).
+    let crashGuardCount: Int
+
+    init(bpm: Int, wasCorrected: Bool, confidence: Double,
+         cadenceSPM: Int, harmonicMatch: CadenceHarmonicMatch,
+         slewDelta: Int = 0, trendBPM: Int = 0, filterReason: String = "clean",
+         crashGuardCount: Int = 0) {
+        self.bpm = bpm
+        self.wasCorrected = wasCorrected
+        self.confidence = confidence
+        self.cadenceSPM = cadenceSPM
+        self.harmonicMatch = harmonicMatch
+        self.slewDelta = slewDelta
+        self.trendBPM = trendBPM
+        self.filterReason = filterReason
+        self.crashGuardCount = crashGuardCount
+    }
 }
 
 /// Which cadence harmonic the HR reading matched.
