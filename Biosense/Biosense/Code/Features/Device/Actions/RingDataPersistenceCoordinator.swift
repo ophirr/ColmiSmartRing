@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import HealthKit
 
 @MainActor
 final class RingDataPersistenceCoordinator {
@@ -636,6 +637,8 @@ extension RingDataPersistenceCoordinator: RingDataDelegate {
 
     func ringDidReceiveHeartRateLog(_ log: HeartRateLog, requestedDay: Date) {
         persistHeartRateLog(log, requestedDay: requestedDay)
+        // Trigger CRF estimation after HR data updates
+        updateCardioFitnessEstimate()
     }
 
     func ringDidReceiveActivityPacket(_ packet: [UInt8]) {
@@ -683,5 +686,122 @@ extension RingDataPersistenceCoordinator: RingDataDelegate {
 
     func ringDidReceiveSpotCheckSpO2(percent: Int, time: Date) {
         persistSpotCheckSpO2(percent: percent, time: time)
+    }
+}
+
+// MARK: - Cardio Fitness Estimation
+
+extension RingDataPersistenceCoordinator {
+
+    /// Compute and persist a daily CRF estimate from resting HR + any available HRR data.
+    /// Called after HR log sync so resting HR data is fresh.
+    func updateCardioFitnessEstimate() {
+        // Check if we already have an estimate for today
+        let todayStart = Calendar.current.startOfDay(for: Date())
+        let todayEnd = Calendar.current.date(byAdding: .day, value: 1, to: todayStart)!
+        let todayDescriptor = FetchDescriptor<StoredCRFEstimate>(
+            predicate: #Predicate<StoredCRFEstimate> { $0.date >= todayStart && $0.date < todayEnd }
+        )
+        if let existing = try? modelContext.fetch(todayDescriptor), !existing.isEmpty {
+            return  // Already computed today
+        }
+
+        // Fetch user profile
+        var profileDescriptor = FetchDescriptor<UserProfile>()
+        profileDescriptor.fetchLimit = 1
+        guard let profile = try? modelContext.fetch(profileDescriptor).first, profile.isComplete else {
+            return  // No profile set up yet
+        }
+
+        // Fetch last 7 days of HR logs and sleep data for resting HR
+        let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: todayStart)!
+        let hrDescriptor = FetchDescriptor<StoredHeartRateLog>(
+            predicate: #Predicate<StoredHeartRateLog> { $0.dayStart >= sevenDaysAgo }
+        )
+        let sleepDescriptor = FetchDescriptor<StoredSleepDay>(
+            predicate: #Predicate<StoredSleepDay> { $0.nightDate >= sevenDaysAgo }
+        )
+        let hrLogs = (try? modelContext.fetch(hrDescriptor)) ?? []
+        let sleepDays = (try? modelContext.fetch(sleepDescriptor)) ?? []
+
+        guard let restingHR = RestingHRComputer.weeklyMedian(hrLogs: hrLogs, sleepDays: sleepDays) else {
+            tLog("[CRF] Insufficient resting HR data — need 3+ valid nights")
+            return
+        }
+
+        // Fetch recent HRR data (last 14 days)
+        let fourteenDaysAgo = Calendar.current.date(byAdding: .day, value: -14, to: todayStart)!
+        let hrrDescriptor = FetchDescriptor<StoredHRRecovery>(
+            predicate: #Predicate<StoredHRRecovery> { $0.recoveryStartTime >= fourteenDaysAgo }
+        )
+        let recoveries = (try? modelContext.fetch(hrrDescriptor)) ?? []
+        let hrrResults = recoveries.compactMap {
+            HRRecoveryAnalyzer.analyze($0, restingBPM: restingHR.restingBPM, hrMax: profile.predictedHRmax)
+        }
+
+        // Fetch previous estimates for trend computation
+        let thirtyDaysAgo = Calendar.current.date(byAdding: .day, value: -30, to: todayStart)!
+        let prevDescriptor = FetchDescriptor<StoredCRFEstimate>(
+            predicate: #Predicate<StoredCRFEstimate> { $0.date >= thirtyDaysAgo && $0.date < todayStart }
+        )
+        let previousEstimates = (try? modelContext.fetch(prevDescriptor)) ?? []
+
+        // Compute estimate
+        guard let estimate = CardioFitnessEstimator.estimate(
+            profile: profile,
+            restingHR: restingHR,
+            hrrResults: hrrResults,
+            previousEstimates: previousEstimates
+        ) else {
+            tLog("[CRF] Could not compute estimate")
+            return
+        }
+
+        // Only persist if confidence is medium or higher
+        guard estimate.confidence != .low else { return }
+
+        let stored = StoredCRFEstimate(
+            date: Date(),
+            vo2maxEstimate: estimate.vo2max,
+            restingBPM: estimate.restingBPM,
+            hrr60: estimate.hrr60,
+            confidence: estimate.confidence.rawValue,
+            source: estimate.source
+        )
+        modelContext.insert(stored)
+        _ = saveContext(tag: "CRFEstimate")
+        tLog("[CRF] New estimate: vo2max=\(String(format: "%.1f", estimate.vo2max)) "
+             + "rhr=\(estimate.restingBPM) source=\(estimate.source) "
+             + "trend=\(estimate.trend.rawValue) confidence=\(estimate.confidence)")
+
+        // Write to HealthKit
+        Task {
+            await writeVO2MaxToHealthKit(estimate: estimate.vo2max, date: Date())
+        }
+    }
+
+    private func writeVO2MaxToHealthKit(estimate: Double, date: Date) async {
+        guard HKHealthStore.isHealthDataAvailable() else { return }
+        let store = HKHealthStore()
+        let vo2Type = HKQuantityType(.vo2Max)
+        let unit = HKUnit.literUnit(with: .milli).unitDivided(by: HKUnit.gramUnit(with: .kilo).unitMultiplied(by: HKUnit.minute()))
+        let quantity = HKQuantity(unit: unit, doubleValue: estimate)
+        let sample = HKQuantitySample(
+            type: vo2Type,
+            quantity: quantity,
+            start: date,
+            end: date,
+            metadata: [
+                HKMetadataKeyVO2MaxTestType: HKVO2MaxTestType.predictionSubMaxExercise.rawValue,
+                HKMetadataKeySyncIdentifier: "biosense.vo2max.\(Int(date.timeIntervalSince1970))",
+                HKMetadataKeySyncVersion: 1
+            ]
+        )
+        do {
+            try await store.save(sample)
+            tLog("[CRF] VO2max written to HealthKit: \(String(format: "%.1f", estimate)) ml/kg/min")
+        } catch {
+            tLog("[CRF] HealthKit write failed: \(error)")
+        }
     }
 }

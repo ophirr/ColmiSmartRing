@@ -11,6 +11,7 @@ struct HomeScreenView: View {
     @Query(sort: \StoredGymSession.startTime, order: .reverse) private var storedGymSessions: [StoredGymSession]
     @Query(sort: \StoredGlucoseSample.timestamp, order: .reverse) private var storedGlucoseSamples: [StoredGlucoseSample]
     @Query(sort: \StoredPhoneStepSample.timestamp, order: .reverse) private var storedPhoneStepSamples: [StoredPhoneStepSample]
+    @Query(sort: \StoredCRFEstimate.date, order: .reverse) private var storedCRFEstimates: [StoredCRFEstimate]
 
     private var latestSleepDurationMinutes: Int? {
         storedSleepDays.first.map { $0.toSleepDay().totalDurationMinutes }
@@ -75,6 +76,28 @@ struct HomeScreenView: View {
         return Int(todaySessions.reduce(0.0) { $0 + $1.durationSeconds } / 60.0)
     }
 
+    /// Current cardio fitness trend from stored estimates.
+    private var cardioFitnessTrend: CardioFitnessTrend? {
+        guard let latest = storedCRFEstimates.first, latest.confidence >= 1 else { return nil }
+        let calendar = Calendar.current
+        let now = Date()
+        // Get estimates from 7-14 days ago
+        let previousWeek = storedCRFEstimates.filter { est in
+            guard let daysAgo = calendar.dateComponents([.day], from: est.date, to: now).day else { return false }
+            return daysAgo >= 7 && daysAgo < 14 && est.confidence >= 1
+        }
+        guard !previousWeek.isEmpty else { return .insufficientData }
+        let previousAvg = previousWeek.reduce(0.0) { $0 + $1.vo2maxEstimate } / Double(previousWeek.count)
+        let delta = latest.vo2maxEstimate - previousAvg
+        if delta > 1.0 { return .improving }
+        if delta < -1.0 { return .declining }
+        return .stable
+    }
+
+    private var cardioFitnessDataPoints: Int {
+        storedCRFEstimates.filter { $0.confidence >= 1 }.count
+    }
+
     private var todaySleepRecord: StoredSleepDay? {
         let today = Calendar.current.startOfDay(for: Date())
         return storedSleepDays.first { Calendar.current.isDate($0.sleepDate, inSameDayAs: today) }
@@ -108,7 +131,9 @@ struct HomeScreenView: View {
                         gymDurationMinutes: todayGymDurationMinutes,
                         spo2Percent: ringSessionManager.realTimeBloodOxygenPercent,
                         temperatureCelsius: ringSessionManager.realTimeTemperatureCelsius,
-                        glucoseMgdl: latestGlucose
+                        glucoseMgdl: latestGlucose,
+                        cardioFitnessTrend: cardioFitnessTrend,
+                        cardioFitnessDataPoints: cardioFitnessDataPoints
                     )
                 }
                 Section(L10n.Sleep.sectionTitle) {

@@ -30,6 +30,8 @@ final class HealthKitAuthorizer {
         HKCategoryType(.sleepAnalysis),
         // Gym
         HKObjectType.workoutType(),
+        // Cardio fitness
+        HKQuantityType(.vo2Max),
     ]
 
     /// All types the app reads from HealthKit (Bioscribe).
@@ -41,6 +43,8 @@ final class HealthKitAuthorizer {
         // Gym dedup
         HKObjectType.workoutType(),
         HKQuantityType(.heartRate),
+        // Cardio fitness
+        HKQuantityType(.vo2Max),
     ]
 
     /// Request all HealthKit permissions. Safe to call multiple times —

@@ -36,6 +36,10 @@ struct HomeSummaryCardsView: View {
     var temperatureCelsius: Double?
     /// Latest glucose reading in mg/dL (nil if no data).
     var glucoseMgdl: Double?
+    /// Cardio fitness trend (nil if insufficient data).
+    var cardioFitnessTrend: CardioFitnessTrend?
+    /// Number of days of CRF data available.
+    var cardioFitnessDataPoints: Int = 0
 
     var body: some View {
         VStack(spacing: 12) {
@@ -48,10 +52,13 @@ struct HomeSummaryCardsView: View {
                 spo2Card
                 temperatureCard
             }
-            if glucoseMgdl != nil {
-                HStack(spacing: 12) {
+            HStack(spacing: 12) {
+                CardioFitnessCardView(
+                    trend: cardioFitnessTrend,
+                    dataPointCount: cardioFitnessDataPoints
+                )
+                if glucoseMgdl != nil {
                     glucoseCard
-                    Spacer()
                 }
             }
         }

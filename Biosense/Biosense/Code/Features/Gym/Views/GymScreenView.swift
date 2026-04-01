@@ -32,7 +32,7 @@ struct GymScreenView: View {
         NavigationStack {
             ZStack {
                 // Full-screen zone gradient background
-                let isActive = gymManager.workoutState == .active || gymManager.workoutState == .paused
+                let isActive = gymManager.workoutState == .active || gymManager.workoutState == .paused || gymManager.workoutState == .recovering
                 LinearGradient(
                     colors: isActive
                         ? [zoneBackground, zoneBackground.opacity(0.4), Color(red: 0.05, green: 0.05, blue: 0.08)]
@@ -50,6 +50,8 @@ struct GymScreenView: View {
                         idleContent
                     case .active, .paused:
                         activeContent
+                    case .recovering:
+                        recoveryContent
                     case .finished:
                         finishedContent
                     }
@@ -285,12 +287,10 @@ struct GymScreenView: View {
                 }
 
                 Button {
-                    completedWorkout = gymManager.stopWorkout()
-                    if let w = completedWorkout {
-                        finishedZoneTimeSeconds = w.zoneTimeSeconds
-                        finishedDurationSeconds = w.durationSeconds
-                    }
-                    showingSaveConfirm = completedWorkout != nil
+                    // Enters recovery mode (180s HR recording), not immediate finish
+                    finishedZoneTimeSeconds = gymManager.zoneTimeSeconds
+                    finishedDurationSeconds = gymManager.elapsedSeconds
+                    gymManager.stopWorkout()
                 } label: {
                     ControlCircle(icon: "stop.fill", color: .red)
                 }
@@ -300,6 +300,68 @@ struct GymScreenView: View {
     }
 
     // MARK: - Finished
+
+    // MARK: - Recovery
+
+    private var recoveryContent: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            // Pulsing heart icon
+            Image(systemName: "heart.fill")
+                .font(.system(size: 50))
+                .foregroundStyle(.red)
+                .symbolEffect(.pulse, isActive: true)
+
+            Text("Recording Recovery")
+                .font(.title2.bold())
+                .foregroundStyle(.primary)
+
+            // Countdown timer
+            let remaining = max(0, Int(GymSessionManager.recoveryDuration - gymManager.recoveryElapsed))
+            Text(formatDuration(Double(remaining)))
+                .font(.system(size: 48, weight: .bold, design: .rounded))
+                .foregroundStyle(.primary)
+                .contentTransition(.numericText())
+                .animation(.easeInOut(duration: 0.3), value: remaining)
+
+            // Current HR
+            if gymManager.currentBPM > 0 {
+                Text("\(gymManager.currentBPM) bpm")
+                    .font(.title3)
+                    .foregroundStyle(.red)
+                    .contentTransition(.numericText())
+                    .animation(.easeInOut(duration: 0.3), value: gymManager.currentBPM)
+            }
+
+            Text("\(gymManager.recoverySamples.count) samples")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+
+            Spacer()
+
+            // Skip button
+            Button {
+                gymManager.skipRecovery()
+            } label: {
+                Text("Skip Recovery")
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+            .padding(.bottom, 40)
+        }
+        .onChange(of: gymManager.workoutState) { _, newState in
+            if newState == .finished {
+                completedWorkout = gymManager.buildCompletedWorkout()
+                if completedWorkout != nil {
+                    showingSaveConfirm = true
+                }
+            }
+        }
+    }
 
     private var finishedContent: some View {
         VStack(spacing: 20) {
@@ -368,6 +430,13 @@ struct GymScreenView: View {
         guard let w = completedWorkout else { return }
         let stored = w.toStoredSession()
         modelContext.insert(stored)
+
+        // Persist HR recovery data if available
+        if let recovery = w.toStoredHRRecovery() {
+            modelContext.insert(recovery)
+            tLog("[Gym] Saved HR recovery: \(recovery.samples.filter { $0 > 0 }.count) valid samples, peak=\(recovery.peakWorkoutBPM)")
+        }
+
         try? modelContext.save()
 
         // Write to Apple Health

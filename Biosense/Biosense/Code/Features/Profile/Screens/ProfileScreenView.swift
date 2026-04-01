@@ -4,6 +4,7 @@ import SwiftData
 struct ProfileScreenView: View {
     @Environment(\.modelContext) private var modelContext
     @Bindable var ringSessionManager: RingSessionManager
+    @Query private var profiles: [UserProfile]
     @State private var showDeleteAllDataConfirmation = false
     @State private var showAddRingSheet = false
 
@@ -37,6 +38,7 @@ struct ProfileScreenView: View {
     var body: some View {
         NavigationStack {
             List {
+                UserProfileFormView(profile: profiles.first ?? UserProfile.current(in: modelContext))
                 DeviceSectionView(ringSessionManager: ringSessionManager, showAddRingSheet: $showAddRingSheet)
                 BatterySectionView(ringSessionManager: ringSessionManager)
                 ActivityTagPickerView()

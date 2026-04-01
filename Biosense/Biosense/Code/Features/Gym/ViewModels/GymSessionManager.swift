@@ -34,6 +34,7 @@ enum GymWorkoutState {
     case idle
     case active
     case paused
+    case recovering   // 180s post-workout HR recovery recording
     case finished
 }
 
@@ -56,6 +57,20 @@ class GymSessionManager {
 
     /// Zone time accumulators (seconds). Indexed by HRZone rawValue.
     var zoneTimeSeconds: [Double] = Array(repeating: 0, count: 6)
+
+    // MARK: - Recovery state
+
+    /// HR samples recorded during post-workout recovery (up to 180s).
+    var recoverySamples: [LiveHRSample] = []
+    /// Seconds elapsed since recovery started.
+    var recoveryElapsed: Double = 0
+    /// HR at the moment the workout was stopped (used for HRR quality gate).
+    var peakWorkoutEndBPM: Int = 0
+    /// Total recovery duration in seconds.
+    static let recoveryDuration: TimeInterval = 180
+
+    private var recoveryTask: Task<Void, Never>?
+    private var recoveryStartTime: Date?
 
     /// Zone config — persisted in UserDefaults.
     var zoneConfig: HRZoneConfig {
@@ -273,14 +288,15 @@ class GymSessionManager {
         }
     }
 
+    /// Stop the workout and enter recovery mode (180s HR recording for cardio fitness estimation).
+    /// Returns nil — the CompletedWorkout is produced when recovery finishes (see `finishRecovery()`).
+    @discardableResult
     func stopWorkout() -> CompletedWorkout? {
         guard workoutState == .active || workoutState == .paused else { return nil }
 
+        // Stop the main workout timer but keep BLE alive for recovery
         timerTask?.cancel()
-        continueTask?.cancel()
         timerTask = nil
-        continueTask = nil
-        workoutState = .finished
 
         // Log HR filter stats
         if useKalmanFilter {
@@ -298,29 +314,59 @@ class GymSessionManager {
                  + "crash_guard=\(hrFilter.crashGuardedCount)")
         }
 
-        // End phone sport mode (0x77) — must be sent before exitWorkoutMode
-        // so the ring finalizes sport data while still connected.
+        // End phone sport mode (0x77) — finalize sport data
         ringManager?.sendPhoneSport(action: .end, type: .running)
 
-        // Exit workout mode — stops the real-time HR stream and returns
-        // the sensor to idle so periodic spot-checks resume.
+        // Capture peak HR at stop for HRR quality gate
+        peakWorkoutEndBPM = currentBPM > 0 ? currentBPM : peakBPM
+
+        if hapticsEnabled {
+            hapticNotification.notificationOccurred(.warning)
+        }
+
+        // Enter recovery mode — keep PPG alive for 180s
+        tLog("[Gym] Entering recovery mode — recording HR for \(Int(Self.recoveryDuration))s")
+        workoutState = .recovering
+        recoverySamples = []
+        recoveryElapsed = 0
+        recoveryStartTime = Date()
+
+        // Recovery tick: sample HR at 1 Hz, send keepalives, auto-finish at 180s
+        recoveryTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, !Task.isCancelled else { break }
+                self.recoveryTick()
+            }
+        }
+
+        return nil
+    }
+
+    /// Skip recovery early and proceed to finished state.
+    func skipRecovery() {
+        guard workoutState == .recovering else { return }
+        tLog("[Gym] Recovery skipped at \(Int(recoveryElapsed))s with \(recoverySamples.count) samples")
+        finishRecovery()
+    }
+
+    /// End recovery and produce the CompletedWorkout.
+    private func finishRecovery() {
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        continueTask?.cancel()
+        continueTask = nil
+
+        // Now fully exit workout mode
         ringManager?.exitWorkoutMode()
 
-        // Clear activity tag so periodic sync resumes normally
+        // Clear activity tag
         InfluxDBWriter.shared.activeTag = .none
 
-        // Re-sync today's activity data so the Home card reflects workout steps.
-        // Three-pass strategy:
-        //   1) 2 s after stop — picks up any already-finalized 15-min slots
-        //      + CMD 0x48 today's totals (includes running steps not in 15-min slots)
-        //   2) 5 min after stop — the ring's current 15-min slot should now be
-        //      finalized, so we get the full workout step count instead of a
-        //      partial read from a still-open slot.
+        // Re-sync activity data (same strategy as before)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             tLog("[Gym] Post-workout activity re-sync (immediate)")
             self?.ringManager?.syncActivityData(dayOffset: 0)
-            // Also request today's aggregated totals — includes running steps
-            // that the 15-min slot history may not count.
             self?.ringManager?.requestTodaySports()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 300.0) { [weak self] in
@@ -329,14 +375,15 @@ class GymSessionManager {
             self?.ringManager?.requestTodaySports()
         }
 
-        if hapticsEnabled {
-            hapticNotification.notificationOccurred(.warning)
-        }
+        workoutState = .finished
+        tLog("[Gym] Recovery finished — \(recoverySamples.count) recovery samples recorded")
+    }
 
+    /// Build the CompletedWorkout from current state (called by UI after recovery finishes).
+    func buildCompletedWorkout() -> CompletedWorkout? {
         guard let start = workoutStartTime else { return nil }
-        let end = Date()
+        let end = recoveryStartTime ?? Date()
 
-        // Capture final sport steps from 0x78 before clearing
         let finalSportSteps = sportSteps
         let finalSportDistanceM = sportDistanceM
 
@@ -355,15 +402,48 @@ class GymSessionManager {
             zoneTimeSeconds: zoneTimeSeconds,
             samples: samples,
             sportSteps: finalSportSteps,
-            sportDistanceM: finalSportDistanceM
+            sportDistanceM: finalSportDistanceM,
+            recoverySamples: recoverySamples,
+            peakWorkoutEndBPM: peakWorkoutEndBPM
         )
+    }
+
+    // MARK: - Recovery tick
+
+    private func recoveryTick() {
+        guard workoutState == .recovering, let recStart = recoveryStartTime else { return }
+        let now = Date()
+        recoveryElapsed = now.timeIntervalSince(recStart)
+
+        // Auto-finish at 180s
+        if recoveryElapsed >= Self.recoveryDuration {
+            finishRecovery()
+            return
+        }
+
+        // Read current HR (simplified — no filtering, PPG is clean at rest)
+        let rawBPM = ringManager?.realTimeHeartRateBPM ?? ringManager?.phoneSportHR ?? 0
+        if rawBPM > 0 {
+            currentBPM = rawBPM
+            let sample = LiveHRSample(timestamp: now, bpm: rawBPM, zone: zoneConfig.zone(for: rawBPM))
+            recoverySamples.append(sample)
+        }
+
+        // Keep the PPG sensor alive with command-30 continue
+        let sinceLastContinue = lastContinueKeepAliveTime.map { now.timeIntervalSince($0) } ?? .infinity
+        if sinceLastContinue >= Self.continueKeepAliveInterval {
+            ringManager?.sendRealtimeHRContinue()
+            lastContinueKeepAliveTime = now
+        }
     }
 
     func resetToIdle() {
         timerTask?.cancel()
         continueTask?.cancel()
+        recoveryTask?.cancel()
         timerTask = nil
         continueTask = nil
+        recoveryTask = nil
         workoutState = .idle
     }
 
@@ -708,6 +788,10 @@ class GymSessionManager {
         hrConfidence = 1.0
         isCadenceFiltered = false
         currentCadenceSPM = 0
+        recoverySamples = []
+        recoveryElapsed = 0
+        peakWorkoutEndBPM = 0
+        recoveryStartTime = nil
     }
 }
 
@@ -725,6 +809,28 @@ struct CompletedWorkout {
     let sportSteps: Int
     /// Distance in meters from phone sport mode.
     let sportDistanceM: Int
+    /// HR samples recorded during 180s post-workout recovery (empty if skipped).
+    let recoverySamples: [LiveHRSample]
+    /// HR at moment of stopping the workout (for HRR quality gate).
+    let peakWorkoutEndBPM: Int
+
+    init(startTime: Date, endTime: Date, durationSeconds: Double, maxHR: Int, avgBPM: Int,
+         peakBPM: Int, zoneTimeSeconds: [Double], samples: [LiveHRSample],
+         sportSteps: Int, sportDistanceM: Int,
+         recoverySamples: [LiveHRSample] = [], peakWorkoutEndBPM: Int = 0) {
+        self.startTime = startTime
+        self.endTime = endTime
+        self.durationSeconds = durationSeconds
+        self.maxHR = maxHR
+        self.avgBPM = avgBPM
+        self.peakBPM = peakBPM
+        self.zoneTimeSeconds = zoneTimeSeconds
+        self.samples = samples
+        self.sportSteps = sportSteps
+        self.sportDistanceM = sportDistanceM
+        self.recoverySamples = recoverySamples
+        self.peakWorkoutEndBPM = peakWorkoutEndBPM
+    }
 
     func toStoredSession() -> StoredGymSession {
         let storedSamples = samples.map { GymHRSample(timestamp: $0.timestamp, bpm: $0.bpm, cadenceFiltered: $0.cadenceFiltered) }
@@ -739,6 +845,31 @@ struct CompletedWorkout {
             sportDistanceM: sportDistanceM,
             zoneTimeSeconds: zoneTimeSeconds,
             samples: storedSamples
+        )
+    }
+
+    /// Build a StoredHRRecovery from the recovery data (nil if no recovery samples).
+    func toStoredHRRecovery() -> StoredHRRecovery? {
+        guard !recoverySamples.isEmpty, let firstSample = recoverySamples.first else { return nil }
+
+        // Convert LiveHRSamples to 1-second indexed BPM array
+        let recoveryStart = firstSample.timestamp
+        let durationSec = Int(recoverySamples.last!.timestamp.timeIntervalSince(recoveryStart)) + 1
+        var bpmArray = [Int](repeating: 0, count: min(durationSec, 180))
+
+        for sample in recoverySamples {
+            let idx = Int(sample.timestamp.timeIntervalSince(recoveryStart))
+            if idx >= 0 && idx < bpmArray.count {
+                bpmArray[idx] = sample.bpm
+            }
+        }
+
+        return StoredHRRecovery(
+            sessionStartTime: startTime,
+            peakWorkoutBPM: peakWorkoutEndBPM,
+            recoveryStartTime: recoveryStart,
+            samples: bpmArray,
+            durationSeconds: bpmArray.count
         )
     }
 }

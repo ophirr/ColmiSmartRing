@@ -26,7 +26,11 @@ struct BiosenseApp: App {
             GymHRSample.self,
             // HealthKit-imported models
             StoredGlucoseSample.self,
-            StoredPhoneStepSample.self
+            StoredPhoneStepSample.self,
+            // Cardio fitness models
+            UserProfile.self,
+            StoredCRFEstimate.self,
+            StoredHRRecovery.self
         ])
         let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
