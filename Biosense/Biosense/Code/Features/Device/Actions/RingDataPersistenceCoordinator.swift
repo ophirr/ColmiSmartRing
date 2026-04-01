@@ -85,17 +85,28 @@ final class RingDataPersistenceCoordinator {
             Task { @MainActor in
                 await healthSleepWriter.writeSleepDays(bigData.days, todayStart: today)
             }
-            // Stream sleep stages to InfluxDB
+            // Stream sleep stages to InfluxDB.
+            // Use the same timestamp computation as makeStoredPeriods so that
+            // re-syncs produce identical timestamps and InfluxDB deduplicates
+            // (same measurement + tags + timestamp = overwrite, not accumulate).
+            // Include a `night` tag so periods from the same calendar night
+            // always share the same tag set regardless of when the sync happens.
+            let nightFormatter = ISO8601DateFormatter()
+            nightFormatter.formatOptions = [.withFullDate]
             for day in bigData.days {
                 let daysAgo = Int(day.daysAgo)
                 let nightDate = calendar.date(byAdding: .day, value: -daysAgo, to: today) ?? today
-                let utcOffset = TimeZone.current.secondsFromGMT(for: nightDate)
-                let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(Int(day.sleepStart) * 60 + utcOffset))
-                var elapsed = 0
+                let nightTag = nightFormatter.string(from: nightDate)
+                // Match makeStoredPeriods: sleepStart is minutes-after-UTC-midnight,
+                // convert to local by adding timezone offset.
+                let utcOffsetSeconds = TimeZone.current.secondsFromGMT(for: nightDate)
+                let localSleepStartSeconds = Int(day.sleepStart) * 60 + utcOffsetSeconds
+                let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(localSleepStartSeconds))
+                var elapsedMinutes = 0
                 for period in day.periods {
-                    let periodStart = sleepStartDate.addingTimeInterval(TimeInterval(elapsed * 60))
-                    elapsed += Int(period.minutes)
-                    influx.writeSleep(stage: sleepTypeName(period.type), durationMinutes: Int(period.minutes), time: periodStart)
+                    let periodStart = sleepStartDate.addingTimeInterval(TimeInterval(elapsedMinutes * 60))
+                    elapsedMinutes += Int(period.minutes)
+                    influx.writeSleep(stage: sleepTypeName(period.type), durationMinutes: Int(period.minutes), night: nightTag, time: periodStart)
                 }
             }
         }

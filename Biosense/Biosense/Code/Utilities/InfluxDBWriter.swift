@@ -271,8 +271,11 @@ final class InfluxDBWriter {
     }
 
     /// Write historical sleep data. No activity tag — same rationale as writeActivity.
-    func writeSleep(stage: String, durationMinutes: Int, time: Date) {
-        write("sleep,source=colmi_r02,stage=\(stage) duration_min=\(durationMinutes)i \(epochSeconds(time))")
+    /// The `night` tag (YYYY-MM-DD) ensures re-syncs of the same calendar night
+    /// produce identical tag sets, so InfluxDB deduplicates on overwrite.
+    func writeSleep(stage: String, durationMinutes: Int, night: String? = nil, time: Date) {
+        let nightTag = night.map { ",night=\($0)" } ?? ""
+        write("sleep,source=colmi_r02,stage=\(stage)\(nightTag) duration_min=\(durationMinutes)i \(epochSeconds(time))")
     }
 
     func writeGymHR(bpm: Int, sessionID: String, time: Date) {
