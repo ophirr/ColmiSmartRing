@@ -208,6 +208,9 @@ class RingSessionManager: NSObject {
     /// Auto-reconnect task after unexpected disconnection.
     private var reconnectTask: Task<Void, Never>?
 
+    /// Resting HR Kalman filter for artifact rejection outside workouts.
+    private let restingHRFilter = RestingHRFilter()
+
     /// Throttle real-time InfluxDB writes.
     private var lastInfluxHRWrite: Date = .distantPast
     private var lastInfluxSpO2Write: Date = .distantPast
@@ -935,9 +938,15 @@ extension RingSessionManager: CBPeripheralDelegate {
             if spotCheckActive && spotCheckType == .realtimeHeartRate {
                 spotCheckHRReadings.append(bpm)
                 tLog("[SpotCheck] HR sample \(spotCheckHRReadings.count): \(bpm) bpm")
-            } else {
+            } else if isWorkoutActive {
+                // Workout mode uses its own Kalman filter (KalmanHRFilter)
                 realTimeHeartRateBPM = bpm
                 throttledInfluxHRWrite(bpm: bpm, at: timestamp)
+            } else {
+                // Resting/sleep: filter artifacts before display and InfluxDB write
+                let result = restingHRFilter.process(rawBPM: bpm, time: timestamp)
+                realTimeHeartRateBPM = result.bpm
+                throttledInfluxHRWrite(bpm: result.bpm, at: timestamp)
             }
 
         case .heartRateZero(let timestamp):

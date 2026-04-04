@@ -286,14 +286,21 @@ final class RingDataPersistenceCoordinator {
         _ = saveContext(tag: "HeartRate")
 
         // Stream to InfluxDB using UTC-anchored timestamps (raw ring slots are UTC-indexed).
+        // Apply resting HR Kalman filter to reject motion artifacts (spikes to 100-170 BPM
+        // during sleep when the ring shifts on the finger).
         let readings = log.heartRatesWithTimesUTC()
         if !readings.isEmpty {
-            tLog("[AutoPersist] HR log → InfluxDB: \(readings.count) non-zero readings (UTC-anchored)")
-            influx.writeHeartRates(readings.map { (bpm: $0.0, time: $0.1) }, tagged: false)
+            let logFilter = RestingHRFilter()
+            let inputReadings = readings.map { (bpm: $0.0, time: $0.1) }
+            let filtered = logFilter.processLog(inputReadings)
+            let cleanReadings = zip(filtered, readings).map { (bpm: $0.0.bpm, time: $0.1.1) }
+            let artifactCount = filtered.filter(\.wasFiltered).count
+            tLog("[AutoPersist] HR log → InfluxDB: \(readings.count) readings, \(artifactCount) artifacts filtered (UTC-anchored)")
+            influx.writeHeartRates(cleanReadings, tagged: false)
 
             // Also write to HealthKit so Apple Health reflects the full HR history.
             Task { @MainActor in
-                await healthHRWriter.writeHeartRateLog(readings.map { (bpm: $0.0, time: $0.1) })
+                await healthHRWriter.writeHeartRateLog(cleanReadings)
             }
         } else {
             tLog("[AutoPersist] HR log → InfluxDB: no non-zero readings")
