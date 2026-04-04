@@ -43,8 +43,8 @@ enum SleepType: UInt8 {
     case error = 1
     case light = 2
     case deep = 3
-    /// Value 4: core sleep (some firmware/APIs use this for REM or “core” stage).
-    case core = 4
+    /// Value 4: REM sleep (firmware sends this as type 4).
+    case rem = 4
     case awake = 5
 }
 
@@ -96,7 +96,7 @@ struct SleepDay: Sendable {
 
     /// Minutes per stage (for summary bars).
     func minutesPerStage() -> [SleepType: Int] {
-        var map: [SleepType: Int] = [.noData: 0, .error: 0, .light: 0, .deep: 0, .core: 0, .awake: 0]
+        var map: [SleepType: Int] = [.noData: 0, .error: 0, .light: 0, .deep: 0, .rem: 0, .awake: 0]
         for p in periods {
             map[p.type, default: 0] += Int(p.minutes)
         }

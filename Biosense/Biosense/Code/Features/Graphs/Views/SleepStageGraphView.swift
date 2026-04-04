@@ -17,7 +17,7 @@ extension SleepType {
         case .error: return L10n.SleepStageLabel.error
         case .light: return L10n.SleepStageLabel.lightSleep
         case .deep: return L10n.SleepStageLabel.deepSleep
-        case .core: return L10n.SleepStageLabel.rem
+        case .rem: return L10n.SleepStageLabel.rem
         case .awake: return L10n.SleepStageLabel.wakeUp
         }
     }
@@ -26,7 +26,7 @@ extension SleepType {
         switch self {
         case .noData, .error: return Color.gray.opacity(0.5)
         case .awake: return Color.orange
-        case .core: return Color.gray
+        case .rem: return Color.gray
         case .light: return Color.purple.opacity(0.6)
         case .deep: return Color.purple
         }
@@ -37,7 +37,7 @@ extension SleepType {
         switch self {
         case .deep: return 0
         case .light: return 1
-        case .core: return 2
+        case .rem: return 2
         case .awake: return 3
         case .noData, .error: return 4
         }
@@ -113,7 +113,7 @@ struct SleepStageGraphView: View {
 
     private var legend: some View {
         HStack(spacing: 12) {
-            ForEach([SleepType.awake, .core, .light, .deep], id: \.rawValue) { type in
+            ForEach([SleepType.awake, .rem, .light, .deep], id: \.rawValue) { type in
                 HStack(spacing: 4) {
                     Circle()
                         .fill(type.stageColor)
@@ -160,7 +160,7 @@ struct SleepStageGraphView: View {
         let total = totalDuration
         let displayTypes: [(SleepType, String)] = [
             (.awake, L10n.SleepStage.awakeTime),
-            (.core, L10n.SleepStage.remDuration),
+            (.rem, L10n.SleepStage.remDuration),
             (.light, L10n.SleepStage.lightSleepDuration),
             (.deep, L10n.SleepStage.deepSleepDuration)
         ]
@@ -211,7 +211,7 @@ struct SleepStageGraphView: View {
         periods: [
             SleepPeriod(type: .light, minutes: 60),
             SleepPeriod(type: .deep, minutes: 45),
-            SleepPeriod(type: .core, minutes: 48),
+            SleepPeriod(type: .rem, minutes: 48),
             SleepPeriod(type: .light, minutes: 120),
             SleepPeriod(type: .awake, minutes: 5),
             SleepPeriod(type: .deep, minutes: 90)

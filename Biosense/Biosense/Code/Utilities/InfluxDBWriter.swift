@@ -273,9 +273,16 @@ final class InfluxDBWriter {
     /// Write historical sleep data. No activity tag — same rationale as writeActivity.
     /// The `night` tag (YYYY-MM-DD) ensures re-syncs of the same calendar night
     /// produce identical tag sets, so InfluxDB deduplicates on overwrite.
-    func writeSleep(stage: String, durationMinutes: Int, night: String? = nil, time: Date) {
+    func writeSleep(stage: String, durationMinutes: Int, night: String? = nil, session: String? = nil, time: Date) {
         let nightTag = night.map { ",night=\($0)" } ?? ""
-        write("sleep,source=colmi_r02,stage=\(stage)\(nightTag) duration_min=\(durationMinutes)i \(epochSeconds(time))")
+        let sessionTag = session.map { ",session=\($0)" } ?? ""
+        write("sleep,source=colmi_r02,stage=\(stage)\(nightTag)\(sessionTag) duration_min=\(durationMinutes)i \(epochSeconds(time))")
+    }
+
+    /// Write a per-night sleep summary with sleepStart/sleepEnd bounds from the ring.
+    /// Timestamp is anchored to nightDate so re-syncs overwrite the same point.
+    func writeSleepSummary(night: String, sleepStartMin: Int, sleepEndMin: Int, totalMin: Int, primaryMin: Int, napMin: Int, time: Date) {
+        write("sleep_summary,source=colmi_r02,night=\(night) sleep_start_min=\(sleepStartMin)i,sleep_end_min=\(sleepEndMin)i,total_min=\(totalMin)i,primary_min=\(primaryMin)i,nap_min=\(napMin)i \(epochSeconds(time))")
     }
 
     func writeGymHR(bpm: Int, sessionID: String, time: Date) {

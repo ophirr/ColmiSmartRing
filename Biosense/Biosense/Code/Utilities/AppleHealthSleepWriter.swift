@@ -73,7 +73,7 @@ final class AppleHealthSleepWriter {
             return .awake
         case .deep:
             return .asleepDeep
-        case .core:
+        case .rem:
             return .asleepREM
         case .light:
             return .asleepCore

@@ -16,6 +16,10 @@ final class RingDataPersistenceCoordinator {
 
     private static let logDateFormatter = ISO8601DateFormatter()
 
+    /// Tracks which nights have already been written to InfluxDB this session
+    /// to prevent re-sync duplicates (ring sends the same data on every reconnect).
+    private var influxSleepNightsWritten: Set<String> = []
+
     init(modelContext: ModelContext, ringSessionManager: RingSessionManager) {
         self.modelContext = modelContext
         self.ringSessionManager = ringSessionManager
@@ -91,23 +95,57 @@ final class RingDataPersistenceCoordinator {
             // (same measurement + tags + timestamp = overwrite, not accumulate).
             // Include a `night` tag so periods from the same calendar night
             // always share the same tag set regardless of when the sync happens.
+            // Split periods into sessions (gaps > 60 min = separate session).
+            // Tag the longest as "primary" (overnight sleep), others as "nap".
             let nightFormatter = ISO8601DateFormatter()
             nightFormatter.formatOptions = [.withFullDate]
             for day in bigData.days {
                 let daysAgo = Int(day.daysAgo)
                 let nightDate = calendar.date(byAdding: .day, value: -daysAgo, to: today) ?? today
                 let nightTag = nightFormatter.string(from: nightDate)
+
+                // Skip if this night was already written to InfluxDB this session.
+                // The ring sends identical data on every reconnect; SwiftData handles
+                // dedup via delete-before-insert, but InfluxDB writes accumulate
+                // at slightly different timestamps causing duplicates.
+                guard !influxSleepNightsWritten.contains(nightTag) else { continue }
+                influxSleepNightsWritten.insert(nightTag)
+
                 // Match makeStoredPeriods: sleepStart is minutes-after-UTC-midnight,
                 // convert to local by adding timezone offset.
                 let utcOffsetSeconds = TimeZone.current.secondsFromGMT(for: nightDate)
                 let localSleepStartSeconds = Int(day.sleepStart) * 60 + utcOffsetSeconds
                 let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(localSleepStartSeconds))
-                var elapsedMinutes = 0
-                for period in day.periods {
-                    let periodStart = sleepStartDate.addingTimeInterval(TimeInterval(elapsedMinutes * 60))
-                    elapsedMinutes += Int(period.minutes)
-                    influx.writeSleep(stage: sleepTypeName(period.type), durationMinutes: Int(period.minutes), night: nightTag, time: periodStart)
+
+                // Build timestamped periods, then split into sessions by gap.
+                let timestampedPeriods = buildTimestampedPeriods(day.periods, startDate: sleepStartDate)
+                let sessions = splitIntoSessions(timestampedPeriods, gapThresholdMinutes: 60)
+
+                // Primary = session overlapping core sleep hours (11 PM – 7 AM); fallback to longest.
+                let primaryIdx = findPrimarySession(sessions) ?? sessions.indices.max(by: { sessions[$0].totalMinutes < sessions[$1].totalMinutes })
+
+                var primaryMin = 0
+                var napMin = 0
+                for (idx, session) in sessions.enumerated() {
+                    let isPrimary = idx == primaryIdx
+                    let sessionTag = isPrimary ? "primary" : "nap"
+                    if isPrimary { primaryMin = session.totalMinutes } else { napMin += session.totalMinutes }
+                    for tp in session.periods {
+                        influx.writeSleep(stage: sleepTypeName(tp.period.type), durationMinutes: Int(tp.period.minutes), night: nightTag, session: sessionTag, time: tp.start)
+                    }
                 }
+
+                // Write per-night summary with ring's sleepStart/sleepEnd bounds.
+                let totalMin = sessions.reduce(0) { $0 + $1.totalMinutes }
+                influx.writeSleepSummary(
+                    night: nightTag,
+                    sleepStartMin: Int(day.sleepStart),
+                    sleepEndMin: Int(day.sleepEnd),
+                    totalMin: totalMin,
+                    primaryMin: primaryMin,
+                    napMin: napMin,
+                    time: sleepStartDate
+                )
             }
         }
     }
@@ -124,6 +162,72 @@ final class RingDataPersistenceCoordinator {
             elapsedMinutes += Int(period.minutes)
             return StoredSleepPeriod(type: period.type, minutes: Int(period.minutes), startTimestamp: start)
         }
+    }
+
+    // MARK: - Sleep Session Splitting
+
+    private struct TimestampedPeriod {
+        let period: SleepPeriod
+        let start: Date
+    }
+
+    private struct SleepSession {
+        let periods: [TimestampedPeriod]
+        var totalMinutes: Int { periods.reduce(0) { $0 + Int($1.period.minutes) } }
+    }
+
+    private func buildTimestampedPeriods(_ periods: [SleepPeriod], startDate: Date) -> [TimestampedPeriod] {
+        var elapsed = 0
+        return periods.map { period in
+            let start = startDate.addingTimeInterval(TimeInterval(elapsed * 60))
+            elapsed += Int(period.minutes)
+            return TimestampedPeriod(period: period, start: start)
+        }
+    }
+
+    /// Split periods into sessions separated by gaps longer than `gapThresholdMinutes`.
+    private func splitIntoSessions(_ periods: [TimestampedPeriod], gapThresholdMinutes: Int) -> [SleepSession] {
+        guard !periods.isEmpty else { return [] }
+        var sessions: [SleepSession] = []
+        var current: [TimestampedPeriod] = [periods[0]]
+        for i in 1..<periods.count {
+            let prevEnd = current.last!.start.addingTimeInterval(TimeInterval(Int(current.last!.period.minutes) * 60))
+            let gap = periods[i].start.timeIntervalSince(prevEnd) / 60
+            if gap >= Double(gapThresholdMinutes) {
+                sessions.append(SleepSession(periods: current))
+                current = [periods[i]]
+            } else {
+                current.append(periods[i])
+            }
+        }
+        sessions.append(SleepSession(periods: current))
+        return sessions
+    }
+
+    /// Find the session with the most overlap in core sleep hours (11 PM – 7 AM local).
+    /// Returns the index of the best overnight session, or nil if none qualify.
+    private func findPrimarySession(_ sessions: [SleepSession]) -> Int? {
+        let calendar = Calendar.current
+        var bestIdx: Int?
+        var bestScore = 0
+        for (idx, session) in sessions.enumerated() {
+            var score = 0
+            for tp in session.periods {
+                // Count how many minutes of this period fall in 11 PM – 7 AM
+                for m in 0..<Int(tp.period.minutes) {
+                    let t = tp.start.addingTimeInterval(TimeInterval(m * 60))
+                    let hour = calendar.component(.hour, from: t)
+                    if hour >= 23 || hour < 7 {
+                        score += 1
+                    }
+                }
+            }
+            if score > bestScore {
+                bestScore = score
+                bestIdx = idx
+            }
+        }
+        return bestIdx
     }
 
     // MARK: - Heart Rate
@@ -633,7 +737,7 @@ final class RingDataPersistenceCoordinator {
         case .error: return "error"
         case .light: return "light"
         case .deep: return "deep"
-        case .core: return "core"
+        case .rem: return "rem"
         case .awake: return "awake"
         }
     }

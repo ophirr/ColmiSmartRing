@@ -75,7 +75,7 @@ enum SleepChartKitAdapter {
     private static func mapStage(_ type: SleepType) -> SleepStage {
         switch type {
         case .awake: return .awake
-        case .core: return .asleepREM
+        case .rem: return .asleepREM
         case .light: return .asleepCore
         case .deep: return .asleepDeep
         case .noData, .error: return .asleepUnspecified
@@ -92,7 +92,7 @@ enum SleepChartKitAdapter {
         periods: [
             SleepPeriod(type: .light, minutes: 60),
             SleepPeriod(type: .deep, minutes: 45),
-            SleepPeriod(type: .core, minutes: 48),
+            SleepPeriod(type: .rem, minutes: 48),
             SleepPeriod(type: .awake, minutes: 5),
             SleepPeriod(type: .deep, minutes: 90)
         ]

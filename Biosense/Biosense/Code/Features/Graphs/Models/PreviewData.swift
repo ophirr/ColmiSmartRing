@@ -190,7 +190,7 @@ enum PreviewData {
             periods: [
                 SleepPeriod(type: .light, minutes: 60),
                 SleepPeriod(type: .deep, minutes: 45),
-                SleepPeriod(type: .core, minutes: 48),
+                SleepPeriod(type: .rem, minutes: 48),
                 SleepPeriod(type: .light, minutes: 120),
                 SleepPeriod(type: .awake, minutes: 5),
                 SleepPeriod(type: .deep, minutes: 90)
