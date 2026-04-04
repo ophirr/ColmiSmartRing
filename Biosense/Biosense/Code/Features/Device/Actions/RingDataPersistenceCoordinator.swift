@@ -296,9 +296,17 @@ final class RingDataPersistenceCoordinator {
             let cleanReadings = zip(filtered, readings).map { (bpm: $0.0.bpm, time: $0.1.1) }
             let artifactCount = filtered.filter(\.wasFiltered).count
             tLog("[AutoPersist] HR log → InfluxDB: \(readings.count) readings, \(artifactCount) artifacts filtered (UTC-anchored)")
-            influx.writeHeartRates(cleanReadings, tagged: false)
 
-            // Also write to HealthKit so Apple Health reflects the full HR history.
+            // Write raw readings (preserves ground truth)
+            influx.writeHeartRates(readings.map { (bpm: $0.0, time: $0.1) }, tagged: false)
+
+            // Write filtered readings as separate measurement for clean queries
+            let filteredForInflux = zip(filtered, readings).map { (r, orig) in
+                (bpm: r.bpm, rawBPM: r.rawBPM, wasFiltered: r.wasFiltered, confidence: r.confidence, time: orig.1)
+            }
+            influx.writeFilteredHeartRates(filteredForInflux, tagged: false)
+
+            // Write filtered data to HealthKit (clean values for Apple Health)
             Task { @MainActor in
                 await healthHRWriter.writeHeartRateLog(cleanReadings)
             }

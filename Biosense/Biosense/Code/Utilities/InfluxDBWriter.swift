@@ -236,6 +236,16 @@ final class InfluxDBWriter {
         write(lines)
     }
 
+    /// Write Kalman-filtered resting HR alongside raw data.
+    /// Separate measurement so raw data is preserved as ground truth.
+    func writeFilteredHeartRates(_ results: [(bpm: Int, rawBPM: Int, wasFiltered: Bool, confidence: Double, time: Date)], tagged: Bool = true) {
+        let t = tagged ? tag : ""
+        let lines = results.map { r in
+            "heart_rate_filtered,source=colmi_r02\(t) bpm=\(r.bpm)i,raw_bpm=\(r.rawBPM)i,was_filtered=\(r.wasFiltered),confidence=\(r.confidence) \(epochSeconds(r.time))"
+        }
+        write(lines)
+    }
+
     /// Write historical HRV data from ring log.  Never tagged — always historical.
     func writeHRV(value: Double, time: Date) {
         write("hrv,source=colmi_r02 ms=\(value) \(epochSeconds(time))")

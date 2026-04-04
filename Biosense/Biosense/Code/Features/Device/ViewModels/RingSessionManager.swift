@@ -947,6 +947,7 @@ extension RingSessionManager: CBPeripheralDelegate {
                 let result = restingHRFilter.process(rawBPM: bpm, time: timestamp)
                 realTimeHeartRateBPM = result.bpm
                 throttledInfluxHRWrite(bpm: result.bpm, at: timestamp)
+                throttledInfluxFilteredHRWrite(result: result, at: timestamp)
             }
 
         case .heartRateZero(let timestamp):
@@ -1727,6 +1728,17 @@ extension RingSessionManager {
         lastInfluxHRWrite = now
         Task { @MainActor in
             InfluxDBWriter.shared.writeHeartRates([(bpm: bpm, time: now)])
+        }
+    }
+
+    private func throttledInfluxFilteredHRWrite(result: RestingHRFilterResult, at now: Date) {
+        // Piggybacks on the same throttle as raw HR — if raw was written, write filtered too.
+        Task { @MainActor in
+            InfluxDBWriter.shared.writeFilteredHeartRates([(
+                bpm: result.bpm, rawBPM: result.rawBPM,
+                wasFiltered: result.wasFiltered, confidence: result.confidence,
+                time: now
+            )])
         }
     }
 
