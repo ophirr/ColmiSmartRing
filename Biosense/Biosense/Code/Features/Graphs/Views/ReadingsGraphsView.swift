@@ -963,6 +963,8 @@ struct ReadingsGraphsView: View {
 
     // MARK: - HRV
 
+    @State private var showingAutonomicInfo = false
+
     private var autonomicSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 12) {
@@ -982,7 +984,19 @@ struct ReadingsGraphsView: View {
                 }
             }
         } header: {
-            Label("Autonomic Health", systemImage: "heart.text.clipboard")
+            HStack {
+                Label("Autonomic Health", systemImage: "heart.text.clipboard")
+                Spacer()
+                Button { showingAutonomicInfo = true } label: {
+                    Image(systemName: "info.circle")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .sheet(isPresented: $showingAutonomicInfo) {
+            AutonomicHealthInfoView()
         }
     }
 
