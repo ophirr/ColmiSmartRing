@@ -253,8 +253,10 @@ struct ReadingsGraphsView: View {
             let hour = idx / slotsPerHour
             // Sleep hours (0-6): reject > 90 BPM as motion artifacts
             if hour < 6 && bpm > 90 { return 0 }
-            // Daytime: reject > 130 BPM as artifacts (not in workout)
-            if bpm > 130 { return 0 }
+            // All hours: reject > 100 BPM. The 5-min HR log captures resting
+            // readings only (workouts use separate telemetry). Readings > 100
+            // in this log are motion artifacts, not real resting HR.
+            if bpm > 100 { return 0 }
             return bpm
         }
     }
