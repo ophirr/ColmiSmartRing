@@ -239,19 +239,23 @@ struct ReadingsGraphsView: View {
 
     // MARK: - Derived autonomic metrics
 
-    /// Apply the resting HR Kalman filter to a stored HR log's readings.
-    /// Uses toHeartRateLog() to rotate slots from UTC to local time first
-    /// (slot 0 = UTC midnight, rotation aligns with local midnight).
-    /// Removes motion artifacts (spikes to 100-170 BPM) before computing metrics.
-    private func filteredHR(from log: StoredHeartRateLog) -> [Int] {
+    /// Get locally-rotated HR log with basic artifact rejection.
+    /// Removes obvious motion artifacts (> 90 BPM during sleep hours 0-6,
+    /// > 130 BPM during daytime) while preserving real physiological variation.
+    /// The Kalman filter is too aggressive here — it flattens the night/day
+    /// difference that these metrics need to measure.
+    private func cleanedHR(from log: StoredHeartRateLog) -> [Int] {
         let localLog = log.toHeartRateLog()
-        let filter = RestingHRFilter()
         let rangeMin = max(localLog.range, 1)
-        let start = Calendar.current.startOfDay(for: log.dayStart)
+        let slotsPerHour = 60 / rangeMin
         return localLog.heartRates.enumerated().map { idx, bpm in
             guard bpm > 0 else { return 0 }
-            let time = start.addingTimeInterval(TimeInterval(idx * rangeMin * 60))
-            return filter.process(rawBPM: bpm, time: time).bpm
+            let hour = idx / slotsPerHour
+            // Sleep hours (0-6): reject > 90 BPM as motion artifacts
+            if hour < 6 && bpm > 90 { return 0 }
+            // Daytime: reject > 130 BPM as artifacts (not in workout)
+            if bpm > 130 { return 0 }
+            return bpm
         }
     }
 
@@ -261,7 +265,7 @@ struct ReadingsGraphsView: View {
         storedHeartRateLogs
             .filter { $0.dayStart >= selectedRangeStart && $0.dayStart < selectedRangeEnd }
             .compactMap { log -> TimeSeriesPoint? in
-                let hrs = filteredHR(from: log)
+                let hrs = cleanedHR(from: log)
                 let range = max(log.range, 1)
                 let slotsPerHour = 60 / range
                 // Night: slots covering 0:00-6:00 local
@@ -289,7 +293,7 @@ struct ReadingsGraphsView: View {
         storedHeartRateLogs
             .filter { $0.dayStart >= selectedRangeStart && $0.dayStart < selectedRangeEnd }
             .compactMap { log -> TimeSeriesPoint? in
-                let valid = filteredHR(from: log).filter { $0 > 0 }.map(Double.init)
+                let valid = cleanedHR(from: log).filter { $0 > 0 }.map(Double.init)
                 guard valid.count >= 5 else { return nil }
                 let mean = valid.reduce(0, +) / Double(valid.count)
                 let variance = valid.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(valid.count)
