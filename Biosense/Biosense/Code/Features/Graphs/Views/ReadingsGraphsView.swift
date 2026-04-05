@@ -7,6 +7,7 @@
 
 import SwiftUI
 import SwiftData
+import Charts
 
 struct ReadingsGraphsView: View {
     @Bindable var ringSessionManager: RingSessionManager
@@ -232,14 +233,53 @@ struct ReadingsGraphsView: View {
     private var rangeActivityCaloriesDaily: [TimeSeriesPoint] {
         dailySum(rangeActivitySamples.map { TimeSeriesPoint(time: $0.timestamp, value: Double($0.calories)) })
     }
-    private var rangeHRVDaily: [TimeSeriesPoint] {
-        dailyAverage(rangeHRVSamples.map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) })
-    }
     private var rangeBloodOxygenDaily: [TimeSeriesPoint] {
         dailyAverage(rangeBloodOxygenSamples.map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) })
     }
-    private var rangeStressDaily: [TimeSeriesPoint] {
-        dailyAverage(rangeStressSamples.map { TimeSeriesPoint(time: $0.timestamp, value: $0.value) })
+
+    // MARK: - Derived autonomic metrics
+
+    /// Night dip ratio per day: avg sleep HR (12a-6a) / avg daytime HR (9a-5p).
+    /// Computed from stored HR logs (5-min slots). Normal: 0.80-0.90.
+    private var nightDipRatioDaily: [TimeSeriesPoint] {
+        storedHeartRateLogs
+            .filter { $0.dayStart >= selectedRangeStart && $0.dayStart < selectedRangeEnd }
+            .compactMap { log -> TimeSeriesPoint? in
+                let hrs = log.heartRates
+                let range = max(log.range, 1)
+                let slotsPerHour = 60 / range
+                // Night: slots covering 0:00-6:00 local
+                let nightSlots = Array(hrs.prefix(6 * slotsPerHour))
+                // Day: slots covering 9:00-17:00 local
+                let dayStart = 9 * slotsPerHour
+                let dayEnd = min(17 * slotsPerHour, hrs.count)
+                let daySlots = dayStart < dayEnd ? Array(hrs[dayStart..<dayEnd]) : []
+
+                let nightValid = nightSlots.filter { $0 > 0 }
+                let dayValid = daySlots.filter { $0 > 0 }
+                guard nightValid.count >= 3, dayValid.count >= 3 else { return nil }
+
+                let nightAvg = Double(nightValid.reduce(0, +)) / Double(nightValid.count)
+                let dayAvg = Double(dayValid.reduce(0, +)) / Double(dayValid.count)
+                guard dayAvg > 0 else { return nil }
+                return TimeSeriesPoint(time: log.dayStart, value: nightAvg / dayAvg)
+            }
+            .sorted { $0.time < $1.time }
+    }
+
+    /// SDHR per day: standard deviation of all non-zero HR readings in the log.
+    /// Proxy for HRV — higher = more autonomic flexibility.
+    private var sdhrDaily: [TimeSeriesPoint] {
+        storedHeartRateLogs
+            .filter { $0.dayStart >= selectedRangeStart && $0.dayStart < selectedRangeEnd }
+            .compactMap { log -> TimeSeriesPoint? in
+                let valid = log.heartRates.filter { $0 > 0 }.map(Double.init)
+                guard valid.count >= 5 else { return nil }
+                let mean = valid.reduce(0, +) / Double(valid.count)
+                let variance = valid.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(valid.count)
+                return TimeSeriesPoint(time: log.dayStart, value: variance.squareRoot())
+            }
+            .sorted { $0.time < $1.time }
     }
 
     /// Daily average heart rate from StoredHeartRateLog (one log per day).
@@ -416,8 +456,7 @@ struct ReadingsGraphsView: View {
                 if includeActivitySection {
                     activitySection
                 }
-                hrvSection
-                stressSection
+                autonomicSection
                 sleepSection
             }
             .listStyle(.insetGrouped)
@@ -924,39 +963,116 @@ struct ReadingsGraphsView: View {
 
     // MARK: - HRV
 
-    private var hrvSection: some View {
+    private var autonomicSection: some View {
         Section {
-            VStack(alignment: .leading, spacing: 4) {
-                switch selectedTimeRange {
-                case .hour1, .hour6, .hour12:
-                    if subDayHRVData.isEmpty {
-                        Text(L10n.Graphs.sampleHRV)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    } else {
-                        HRVChartView(data: subDayHRVData, timeRange: selectedTimeRange, xDomain: chartXDomain)
-                    }
-                case .day:
-                    if hrvData.isEmpty {
-                        Text(L10n.Graphs.sampleHRV)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    } else {
-                        HRVChartView(data: hrvData, xDomain: selectedDayStart...selectedDayEnd)
-                    }
-                case .week, .month:
-                    if rangeHRVDaily.isEmpty {
-                        Text(L10n.Graphs.sampleHRV)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    } else {
-                        metricSummaryRow(data: rangeHRVDaily, unit: "ms")
-                        HRVChartView(data: rangeHRVDaily, title: "HRV (daily avg)", timeRange: selectedTimeRange, xDomain: chartXDomain)
-                    }
+            VStack(alignment: .leading, spacing: 12) {
+                // Night Dip Ratio
+                if !nightDipRatioDaily.isEmpty {
+                    nightDipRatioView
+                } else {
+                    Text("Sync HR data to see autonomic metrics.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+
+                // SDHR
+                if !sdhrDaily.isEmpty {
+                    Divider()
+                    sdhrView
                 }
             }
         } header: {
-            Label(L10n.Graphs.hrvSection, systemImage: "waveform.path.ecg")
+            Label("Autonomic Health", systemImage: "heart.text.clipboard")
+        }
+    }
+
+    private var nightDipRatioView: some View {
+        let data = nightDipRatioDaily
+        let latest = data.last?.value ?? 0
+        let avg = data.isEmpty ? 0 : data.map(\.value).reduce(0, +) / Double(data.count)
+        let assessment: String
+        let color: Color
+        if avg < 0.80 { assessment = "Extreme dipper"; color = .blue }
+        else if avg < 0.90 { assessment = "Normal dipper"; color = .green }
+        else if avg < 1.00 { assessment = "Non-dipper"; color = .orange }
+        else { assessment = "Reverse dipper"; color = .red }
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Night Dip Ratio")
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+                Text(String(format: "%.3f", latest))
+                    .font(.title2.weight(.bold).monospacedDigit())
+            }
+            HStack(spacing: 12) {
+                Text(assessment)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(color)
+                Text("Avg: \(String(format: "%.3f", avg))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Sleep HR ÷ Day HR")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            if data.count > 1 {
+                Chart(data, id: \.time) { point in
+                    LineMark(x: .value("Date", point.time), y: .value("Ratio", point.value))
+                        .foregroundStyle(.green.gradient)
+                        .interpolationMethod(.catmullRom)
+                    PointMark(x: .value("Date", point.time), y: .value("Ratio", point.value))
+                        .foregroundStyle(point.value < 0.90 ? .green : .orange)
+                        .symbolSize(20)
+                }
+                .chartYScale(domain: 0.7...1.1)
+                .chartYAxis {
+                    AxisMarks(values: [0.8, 0.9, 1.0]) { value in
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4, 4]))
+                        AxisValueLabel {
+                            if let v = value.as(Double.self) {
+                                Text(String(format: "%.1f", v))
+                                    .font(.caption2)
+                            }
+                        }
+                    }
+                }
+                .frame(height: 120)
+            }
+        }
+    }
+
+    private var sdhrView: some View {
+        let data = sdhrDaily
+        let latest = data.last?.value ?? 0
+        let avg = data.isEmpty ? 0 : data.map(\.value).reduce(0, +) / Double(data.count)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("HR Variability (SDHR)")
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+                Text(String(format: "%.1f", latest))
+                    .font(.title2.weight(.bold).monospacedDigit())
+                Text("bpm")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 12) {
+                Text("Avg: \(String(format: "%.1f", avg)) bpm")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Daily HR standard deviation")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            if data.count > 1 {
+                Chart(data, id: \.time) { point in
+                    BarMark(x: .value("Date", point.time, unit: .day), y: .value("SDHR", point.value))
+                        .foregroundStyle(.purple.gradient)
+                }
+                .frame(height: 120)
+            }
         }
     }
 
@@ -998,43 +1114,7 @@ struct ReadingsGraphsView: View {
         }
     }
 
-    // MARK: - Stress
-
-    private var stressSection: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 4) {
-                switch selectedTimeRange {
-                case .hour1, .hour6, .hour12:
-                    if subDayStressData.isEmpty {
-                        Text(L10n.Graphs.sampleStress)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    } else {
-                        StressChartView(data: subDayStressData, timeRange: selectedTimeRange, xDomain: chartXDomain)
-                    }
-                case .day:
-                    if stressData.isEmpty {
-                        Text(L10n.Graphs.sampleStress)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    } else {
-                        StressChartView(data: stressData, xDomain: selectedDayStart...selectedDayEnd)
-                    }
-                case .week, .month:
-                    if rangeStressDaily.isEmpty {
-                        Text(L10n.Graphs.sampleStress)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    } else {
-                        metricSummaryRow(data: rangeStressDaily, unit: "")
-                        StressChartView(data: rangeStressDaily, title: "Stress (daily avg)", timeRange: selectedTimeRange, xDomain: chartXDomain)
-                    }
-                }
-            }
-        } header: {
-            Label(L10n.Graphs.stressSection, systemImage: "leaf.fill")
-        }
-    }
+    // MARK: - (Stress section removed — replaced by derived autonomic metrics)
 
     // MARK: - Real-time tracking
 
