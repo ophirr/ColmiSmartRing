@@ -264,12 +264,8 @@ struct ReadingsGraphsView: View {
         }
     }
 
-    /// Night dip ratio per day: avg sleep HR (12a-6a) / avg daytime HR (9a-5p).
-    /// Computed from Kalman-filtered HR logs. Normal: 0.80-0.90.
-    private var nightDipRatioDaily: [TimeSeriesPoint] {
-        storedHeartRateLogs
-            .filter { $0.dayStart >= selectedRangeStart && $0.dayStart < selectedRangeEnd }
-            .compactMap { log -> TimeSeriesPoint? in
+    private func computeNightDipRatio(from logs: [StoredHeartRateLog]) -> [TimeSeriesPoint] {
+        logs.compactMap { log -> TimeSeriesPoint? in
                 let hrs = cleanedHR(from: log)
                 let range = max(log.range, 1)
                 let slotsPerHour = 60 / range
@@ -292,14 +288,16 @@ struct ReadingsGraphsView: View {
             .sorted { $0.time < $1.time }
     }
 
-    /// SDHR per day: standard deviation of sleep-hour HR readings (0-6 AM).
-    /// Computed from sleep hours only — during sleep, HR variability reflects
-    /// autonomic tone rather than activity. Full-day SD is dominated by the
-    /// circadian sleep/wake swing and doesn't measure autonomic flexibility.
-    private var sdhrDaily: [TimeSeriesPoint] {
-        storedHeartRateLogs
-            .filter { $0.dayStart >= selectedRangeStart && $0.dayStart < selectedRangeEnd }
-            .compactMap { log -> TimeSeriesPoint? in
+    private var nightDipRatioDaily: [TimeSeriesPoint] {
+        computeNightDipRatio(from: storedHeartRateLogs.filter { $0.dayStart >= selectedRangeStart && $0.dayStart < selectedRangeEnd })
+    }
+
+    private var nightDipRatioAll: [TimeSeriesPoint] {
+        computeNightDipRatio(from: Array(storedHeartRateLogs))
+    }
+
+    private func computeSDHR(from logs: [StoredHeartRateLog]) -> [TimeSeriesPoint] {
+        logs.compactMap { log -> TimeSeriesPoint? in
                 let hrs = cleanedHR(from: log)
                 let rangeMin = max(log.range, 1)
                 let slotsPerHour = 60 / rangeMin
@@ -312,6 +310,14 @@ struct ReadingsGraphsView: View {
                 return TimeSeriesPoint(time: log.dayStart, value: variance.squareRoot())
             }
             .sorted { $0.time < $1.time }
+    }
+
+    private var sdhrDaily: [TimeSeriesPoint] {
+        computeSDHR(from: storedHeartRateLogs.filter { $0.dayStart >= selectedRangeStart && $0.dayStart < selectedRangeEnd })
+    }
+
+    private var sdhrAll: [TimeSeriesPoint] {
+        computeSDHR(from: Array(storedHeartRateLogs))
     }
 
     /// Daily average heart rate from StoredHeartRateLog (one log per day).
@@ -1033,10 +1039,26 @@ struct ReadingsGraphsView: View {
     }
 
     /// Trend indicator: compares latest value to previous. Returns (icon, color, delta).
-    private func trend(data: [TimeSeriesPoint]) -> (icon: String, color: Color, delta: Double)? {
-        guard data.count >= 2 else { return nil }
-        let latest = data[data.count - 1].value
-        let previous = data[data.count - 2].value
+    /// When the visible data has only one point (day view), looks back at all stored
+    /// logs to find the previous day's value for comparison.
+    private func trend(data: [TimeSeriesPoint], allData: [TimeSeriesPoint]? = nil) -> (icon: String, color: Color, delta: Double)? {
+        let latest: Double
+        let previous: Double
+        if data.count >= 2 {
+            latest = data[data.count - 1].value
+            previous = data[data.count - 2].value
+        } else if data.count == 1, let all = allData, all.count >= 2 {
+            // Day view: only one point in range, use full dataset for previous
+            latest = data[0].value
+            let sorted = all.sorted { $0.time < $1.time }
+            if let idx = sorted.lastIndex(where: { $0.time < data[0].time }) {
+                previous = sorted[idx].value
+            } else {
+                return nil
+            }
+        } else {
+            return nil
+        }
         let delta = latest - previous
         if abs(delta) < 0.001 { return ("minus", .gray, 0) }
         return delta > 0
@@ -1055,7 +1077,7 @@ struct ReadingsGraphsView: View {
         else if avg < 1.00 { assessment = "Non-dipper"; color = .orange }
         else { assessment = "Reverse dipper"; color = .red }
         // For night dip, lower is better (stronger dip), so invert arrow meaning
-        let dipTrend = trend(data: data)
+        let dipTrend = trend(data: data, allData: nightDipRatioAll)
         let trendIcon = dipTrend.map { $0.delta < 0 ? "arrow.down.right" : "arrow.up.right" }
         let trendColor: Color? = dipTrend.map { $0.delta < 0 ? .green : .orange }
 
@@ -1118,7 +1140,7 @@ struct ReadingsGraphsView: View {
         let latest = data.last?.value ?? 0
         let avg = data.isEmpty ? 0 : data.map(\.value).reduce(0, +) / Double(data.count)
         // Higher SDHR = better autonomic flexibility
-        let sdhrTrend = trend(data: data)
+        let sdhrTrend = trend(data: data, allData: sdhrAll)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
