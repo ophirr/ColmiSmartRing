@@ -342,13 +342,31 @@ def analyze_sleep():
         duration = int(float(r["_value"]))
         raw_periods_by_night[night].append((t, stage, duration))
 
-    # Dedup re-syncs: if two periods have same stage, same duration, and start
-    # within 10 minutes of each other, keep only the first.
+    # Dedup strategy: InfluxDB contains both old (-7h offset) and corrected (+7h)
+    # sleep timestamps. For each period, if a matching period exists ~7h later
+    # (same stage, same duration), drop the earlier (old) one and keep the later
+    # (corrected) one. Also dedup re-syncs (same stage+dur within 10 min).
+    TZ_OFFSET = 7 * 3600  # 7h in seconds
+    TZ_TOL = 600          # 10 min tolerance
     periods_by_night = {}
     for night, periods in raw_periods_by_night.items():
         periods.sort(key=lambda x: x[0])
+        # Pass 1: mark old periods that have a corrected counterpart ~7h later
+        drop = set()
+        for i, (t1, s1, d1) in enumerate(periods):
+            for j, (t2, s2, d2) in enumerate(periods):
+                if j <= i:
+                    continue
+                diff = (t2 - t1).total_seconds()
+                if diff > TZ_OFFSET + TZ_TOL:
+                    break  # sorted, no more matches possible
+                if s1 == s2 and d1 == d2 and abs(diff - TZ_OFFSET) < TZ_TOL:
+                    drop.add(i)  # drop the earlier (old) one
+                    break
+        filtered = [p for i, p in enumerate(periods) if i not in drop]
+        # Pass 2: dedup re-syncs (same stage+dur within 10 min)
         deduped = []
-        for t, stage, dur in periods:
+        for t, stage, dur in filtered:
             is_dup = False
             for dt, ds, dd in deduped:
                 if ds == stage and dd == dur and abs((t - dt).total_seconds()) < 600:
