@@ -31,6 +31,12 @@ final class RingDataPersistenceCoordinator {
     func start() {
         SwiftDataMigrations.runAll(context: modelContext)
         ringSessionManager.dataDelegate = self
+
+        // One-time import of workouts that were saved to InfluxDB but not SwiftData
+        // (bug: save dialog didn't appear between March 30 and April 5 fix).
+        Task { @MainActor in
+            await WorkoutInfluxImporter.importMissingSessions(context: modelContext)
+        }
     }
 
     // MARK: - Sleep
