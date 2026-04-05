@@ -132,9 +132,12 @@ struct SleepDay: Sendable {
     }
 
     /// Whether this sleep record looks like a nap (daytime, < 3 hours).
+    /// sleepStart is UTC minutes — convert to local hour for the check.
     var isNap: Bool {
-        let startHour = ((Int(sleepStart) / 60) % 24 + 24) % 24
-        return startHour >= 6 && startHour < 18 && totalDurationMinutes < 180
+        let utcOffsetMinutes = TimeZone.current.secondsFromGMT() / 60
+        let localMinutes = Int(sleepStart) + utcOffsetMinutes
+        let localHour = ((localMinutes / 60) % 24 + 24) % 24
+        return localHour >= 6 && localHour < 18 && totalDurationMinutes < 180
     }
 
     /// Minutes per stage (for summary bars).

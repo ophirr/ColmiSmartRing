@@ -53,11 +53,13 @@ enum SleepChartKitAdapter {
     }
 
     /// Start of sleep (bedtime) for this night.
-    /// sleepStart is minutes-after-midnight on the ring's clock.
-    /// The ring reports times that display directly without timezone conversion.
+    /// sleepStart is minutes-after-UTC-midnight (ring clock is UTC).
+    /// Convert to local by applying the timezone offset.
     private static func sleepStartDate(for day: SleepDay, nightDate: Date?) -> Date {
         let ref = referenceDate(for: day, nightDate: nightDate)
-        return ref.addingTimeInterval(TimeInterval(Int(day.sleepStart) * 60))
+        let utcOffsetSeconds = TimeZone.current.secondsFromGMT(for: ref)
+        let localSleepStartMinutes = Int(day.sleepStart) + (utcOffsetSeconds / 60)
+        return ref.addingTimeInterval(TimeInterval(localSleepStartMinutes * 60))
     }
 
     static func samples(from day: SleepDay, nightDate: Date?) -> [SleepSample] {

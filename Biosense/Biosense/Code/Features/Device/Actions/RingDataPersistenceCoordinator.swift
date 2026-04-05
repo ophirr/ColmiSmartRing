@@ -111,9 +111,11 @@ final class RingDataPersistenceCoordinator {
                 guard !influxSleepNightsWritten.contains(nightTag) else { continue }
                 influxSleepNightsWritten.insert(nightTag)
 
-                // sleepStart is minutes-after-midnight on the ring's clock.
-                // The ring reports times that correspond directly to local wall-clock time.
-                let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(Int(day.sleepStart) * 60))
+                // sleepStart is minutes-after-UTC-midnight (ring clock is UTC).
+                // Convert to local by adding timezone offset.
+                let utcOffsetSeconds = TimeZone.current.secondsFromGMT(for: nightDate)
+                let localSleepStartSeconds = Int(day.sleepStart) * 60 + utcOffsetSeconds
+                let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(localSleepStartSeconds))
 
                 // Build timestamped periods, then split into sessions by gap.
                 let timestampedPeriods = buildTimestampedPeriods(day.periods, startDate: sleepStartDate)
@@ -149,9 +151,11 @@ final class RingDataPersistenceCoordinator {
     }
 
     private func makeStoredPeriods(from day: SleepDay, nightDate: Date) -> [StoredSleepPeriod] {
-        // sleepStart is minutes-after-midnight on the ring's clock.
-        // nightDate is local midnight. No timezone offset needed.
-        let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(Int(day.sleepStart) * 60))
+        // sleepStart is minutes-after-UTC-midnight (ring clock is UTC).
+        // nightDate is local midnight. Apply UTC offset to convert.
+        let utcOffsetSeconds = TimeZone.current.secondsFromGMT(for: nightDate)
+        let localSleepStartSeconds = Int(day.sleepStart) * 60 + utcOffsetSeconds
+        let sleepStartDate = nightDate.addingTimeInterval(TimeInterval(localSleepStartSeconds))
         var elapsedMinutes = 0
         return day.periods.map { period in
             let start = sleepStartDate.addingTimeInterval(TimeInterval(elapsedMinutes * 60))
