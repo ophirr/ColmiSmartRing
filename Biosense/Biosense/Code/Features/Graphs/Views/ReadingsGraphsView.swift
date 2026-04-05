@@ -1122,7 +1122,7 @@ struct ReadingsGraphsView: View {
                         .foregroundStyle(point.value < 0.90 ? .green : .orange)
                         .symbolSize(20)
                 }
-                .chartYScale(domain: 0.7...1.1)
+                .chartYScale(domain: max(0.6, (data.map(\.value).min() ?? 0.7) - 0.05)...1.1)
                 .padding(.top, 4)
                 .chartYAxis {
                     AxisMarks(values: [0.8, 0.9, 1.0]) { value in
