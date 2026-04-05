@@ -289,13 +289,20 @@ struct ReadingsGraphsView: View {
             .sorted { $0.time < $1.time }
     }
 
-    /// SDHR per day: standard deviation of Kalman-filtered HR readings.
-    /// Proxy for HRV — higher = more autonomic flexibility.
+    /// SDHR per day: standard deviation of sleep-hour HR readings (0-6 AM).
+    /// Computed from sleep hours only — during sleep, HR variability reflects
+    /// autonomic tone rather than activity. Full-day SD is dominated by the
+    /// circadian sleep/wake swing and doesn't measure autonomic flexibility.
     private var sdhrDaily: [TimeSeriesPoint] {
         storedHeartRateLogs
             .filter { $0.dayStart >= selectedRangeStart && $0.dayStart < selectedRangeEnd }
             .compactMap { log -> TimeSeriesPoint? in
-                let valid = cleanedHR(from: log).filter { $0 > 0 }.map(Double.init)
+                let hrs = cleanedHR(from: log)
+                let rangeMin = max(log.range, 1)
+                let slotsPerHour = 60 / rangeMin
+                // Only sleep hours (0:00-6:00 local)
+                let nightSlots = Array(hrs.prefix(6 * slotsPerHour))
+                let valid = nightSlots.filter { $0 > 0 }.map(Double.init)
                 guard valid.count >= 5 else { return nil }
                 let mean = valid.reduce(0, +) / Double(valid.count)
                 let variance = valid.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(valid.count)
@@ -1099,7 +1106,7 @@ struct ReadingsGraphsView: View {
                 Text("Avg: \(String(format: "%.1f", avg)) bpm")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("Daily HR standard deviation")
+                Text("Sleep HR variability")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
