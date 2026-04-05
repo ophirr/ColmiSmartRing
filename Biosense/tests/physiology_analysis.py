@@ -546,107 +546,121 @@ def analyze_sleep():
         print(f"\n  No naps detected.")
 
 
-def analyze_hrv():
-    """HRV analysis."""
+def analyze_autonomic():
+    """Derived autonomic metrics: night dip ratio, SDHR, RMSSD proxy."""
+    import math
+
     print("\n" + "="*70)
-    print("HRV (HEART RATE VARIABILITY) ANALYSIS")
+    print("AUTONOMIC METRICS (Derived from Filtered HR)")
     print("="*70)
 
     q = f'''
     from(bucket: "{BUCKET}")
       |> range(start: 2026-03-26T00:00:00Z)
-      |> filter(fn: (r) => r._measurement == "hrv" and r._field == "ms")
-      |> yield(name: "hrv")
+      |> filter(fn: (r) => r._measurement == "heart_rate_filtered" and r._field == "bpm")
+      |> yield(name: "hr")
     '''
     rows = query_influx(q)
     if not rows:
-        print("No HRV data found.")
+        print("No filtered HR data found.")
         return
 
     data = []
     for r in rows:
-        val = float(r["_value"])
+        bpm = int(float(r["_value"]))
         t = parse_time(r["_time"]).astimezone(PT)
-        data.append((t, val))
+        data.append((t, bpm))
+    data.sort()
 
-    data.sort(key=lambda x: x[0])
-    vals = [d[1] for d in data]
+    by_date = defaultdict(list)
+    for t, bpm in data:
+        by_date[t.strftime("%Y-%m-%d")].append((t, bpm))
 
-    print(f"\nTotal readings: {len(data):,}")
-    print(f"Data range: {data[0][0].strftime('%Y-%m-%d %H:%M')} to {data[-1][0].strftime('%Y-%m-%d %H:%M')} PT")
-    print(f"\n--- Overall Stats ---")
-    print(f"  Lowest HRV:   {min(vals):.0f} ms")
-    print(f"  Highest HRV:  {max(vals):.0f} ms")
-    print(f"  Mean HRV:     {sum(vals)/len(vals):.1f} ms")
-    median = sorted(vals)[len(vals)//2]
-    print(f"  Median HRV:   {median:.0f} ms")
+    # --- Night Dip Ratio ---
+    print(f"\n--- Night Dip Ratio ---")
+    print(f"  Sleep HR / Daytime HR. Normal dipper: 0.80-0.90")
+    print(f"  < 0.80 extreme dipper | 0.80-0.90 normal | 0.90-1.0 non-dipper | > 1.0 reverse")
+    print(f"\n  {'Date':12s} {'Night':>6s} {'Day':>6s} {'Ratio':>6s}  Assessment")
+    print(f"  {'-'*12} {'-'*6} {'-'*6} {'-'*6}  {'-'*20}")
 
-    # By time of day
-    print(f"\n--- HRV by Time of Day ---")
-    by_bucket = defaultdict(list)
-    for t, val in data:
-        by_bucket[time_bucket(t)].append(val)
-    for bucket_name in ["night (12a-6a)", "early morning (6a-9a)", "morning (9a-12p)",
-                         "midday (12p-2p)", "afternoon (2p-5p)", "evening (5p-9p)", "late night (9p-12a)"]:
-        bvals = by_bucket.get(bucket_name, [])
-        if bvals:
-            avg = sum(bvals) / len(bvals)
-            print(f"  {bucket_name:25s}: avg {avg:5.1f} ms  (n={len(bvals):,})")
+    ratios = []
+    for date in sorted(by_date.keys()):
+        readings = by_date[date]
+        night = [b for t, b in readings if 0 <= t.hour < 6]
+        day = [b for t, b in readings if 9 <= t.hour < 17]
+        if len(night) < 5 or len(day) < 5:
+            continue
+        night_avg = sum(night) / len(night)
+        day_avg = sum(day) / len(day)
+        ratio = night_avg / day_avg
+        ratios.append(ratio)
+        if ratio < 0.80: assess = "extreme dipper"
+        elif ratio < 0.90: assess = "dipper (normal)"
+        elif ratio < 1.00: assess = "non-dipper"
+        else: assess = "reverse dipper!"
+        print(f"  {date:12s} {night_avg:6.1f} {day_avg:6.1f} {ratio:6.3f}  {assess}")
 
-    # Daily trend
-    print(f"\n--- Daily HRV ---")
-    by_day = defaultdict(list)
-    for t, val in data:
-        by_day[t.strftime("%Y-%m-%d")].append(val)
-    for day in sorted(by_day.keys()):
-        dvals = by_day[day]
-        avg = sum(dvals) / len(dvals)
-        print(f"  {day}: avg {avg:5.1f} ms  max {max(dvals):.0f} ms  (n={len(dvals):,})")
+    if ratios:
+        avg_r = sum(ratios) / len(ratios)
+        print(f"\n  Overall avg: {avg_r:.3f} — {'normal dipper' if 0.80 <= avg_r < 0.90 else 'extreme dipper' if avg_r < 0.80 else 'non-dipper'}")
 
+    # --- SDHR ---
+    print(f"\n--- SDHR (HR Standard Deviation) ---")
+    print(f"  Proxy for HRV. Higher = more autonomic flexibility.")
+    print(f"\n  {'Date':12s} {'Night':>7s} {'Day':>7s} {'All':>7s}  {'N/D':>5s}")
+    print(f"  {'-'*12} {'-'*7} {'-'*7} {'-'*7}  {'-'*5}")
 
-def analyze_stress():
-    """Stress level analysis."""
-    print("\n" + "="*70)
-    print("STRESS LEVEL ANALYSIS")
-    print("="*70)
+    def sd(vals):
+        if len(vals) < 3: return None
+        m = sum(vals) / len(vals)
+        return math.sqrt(sum((x - m)**2 for x in vals) / len(vals))
 
-    q = f'''
-    from(bucket: "{BUCKET}")
-      |> range(start: 2026-03-26T00:00:00Z)
-      |> filter(fn: (r) => r._measurement == "stress" and r._field == "level")
-      |> yield(name: "stress")
-    '''
-    rows = query_influx(q)
-    if not rows:
-        print("No stress data found.")
-        return
+    night_sds, day_sds = [], []
+    for date in sorted(by_date.keys()):
+        readings = by_date[date]
+        night = [b for t, b in readings if 0 <= t.hour < 6]
+        day = [b for t, b in readings if 9 <= t.hour < 17]
+        all_bpms = [b for _, b in readings]
+        all_sd = sd(all_bpms)
+        n_sd = sd(night)
+        d_sd = sd(day)
+        if n_sd is not None: night_sds.append(n_sd)
+        if d_sd is not None: day_sds.append(d_sd)
+        ns = f"{n_sd:5.2f}" if n_sd else "  -  "
+        ds = f"{d_sd:5.2f}" if d_sd else "  -  "
+        nd = f"{n_sd/d_sd:.2f}" if n_sd and d_sd and d_sd > 0 else "  -"
+        print(f"  {date:12s} {ns:>7s} {ds:>7s} {all_sd:7.2f}  {nd:>5s}")
 
-    data = []
-    for r in rows:
-        val = float(r["_value"])
-        t = parse_time(r["_time"]).astimezone(PT)
-        data.append((t, val))
+    if night_sds and day_sds:
+        print(f"\n  Avg night SDHR: {sum(night_sds)/len(night_sds):.2f} bpm")
+        print(f"  Avg day SDHR:   {sum(day_sds)/len(day_sds):.2f} bpm")
+        nd_avg = (sum(night_sds)/len(night_sds)) / (sum(day_sds)/len(day_sds))
+        print(f"  N/D ratio:      {nd_avg:.2f} ({'normal — lower variability during sleep' if nd_avg < 0.6 else 'elevated night variability'})")
 
-    data.sort(key=lambda x: x[0])
-    vals = [d[1] for d in data]
+    # --- RMSSD Proxy ---
+    print(f"\n--- RMSSD Proxy (successive BPM differences) ---")
+    print(f"  {'Date':12s} {'Night':>7s} {'Day':>7s}")
+    print(f"  {'-'*12} {'-'*7} {'-'*7}")
 
-    print(f"\nTotal readings: {len(data):,}")
-    print(f"\n--- Overall Stats ---")
-    print(f"  Lowest stress:  {min(vals):.0f}")
-    print(f"  Highest stress: {max(vals):.0f}")
-    print(f"  Mean stress:    {sum(vals)/len(vals):.1f}")
+    def rmssd_proxy(readings):
+        if len(readings) < 3: return None
+        diffs = []
+        for i in range(1, len(readings)):
+            dt = (readings[i][0] - readings[i-1][0]).total_seconds()
+            if dt < 600:
+                diffs.append((readings[i][1] - readings[i-1][1])**2)
+        if not diffs: return None
+        return math.sqrt(sum(diffs) / len(diffs))
 
-    # By time of day
-    print(f"\n--- Stress by Time of Day ---")
-    by_bucket = defaultdict(list)
-    for t, val in data:
-        by_bucket[time_bucket(t)].append(val)
-    for bucket_name in ["night (12a-6a)", "early morning (6a-9a)", "morning (9a-12p)",
-                         "midday (12p-2p)", "afternoon (2p-5p)", "evening (5p-9p)", "late night (9p-12a)"]:
-        bvals = by_bucket.get(bucket_name, [])
-        if bvals:
-            avg = sum(bvals) / len(bvals)
-            print(f"  {bucket_name:25s}: avg {avg:5.1f}  (n={len(bvals):,})")
+    for date in sorted(by_date.keys()):
+        readings = by_date[date]
+        night_r = [(t, b) for t, b in readings if 0 <= t.hour < 6]
+        day_r = [(t, b) for t, b in readings if 9 <= t.hour < 17]
+        n = rmssd_proxy(night_r)
+        d = rmssd_proxy(day_r)
+        ns = f"{n:5.2f}" if n else "  -  "
+        ds = f"{d:5.2f}" if d else "  -  "
+        print(f"  {date:12s} {ns:>7s} {ds:>7s}")
 
 
 def analyze_temp():
@@ -808,8 +822,7 @@ if __name__ == "__main__":
     analyze_spo2()
     analyze_activity()
     analyze_sleep()
-    analyze_hrv()
-    analyze_stress()
+    analyze_autonomic()
     analyze_temp()
     analyze_otf_workouts()
 
