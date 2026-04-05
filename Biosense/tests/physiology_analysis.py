@@ -74,10 +74,11 @@ def analyze_heart_rate():
     print("HEART RATE ANALYSIS")
     print("="*70)
 
+    # Use Kalman-filtered HR data for clean artifact-free analysis
     q = f'''
     from(bucket: "{BUCKET}")
       |> range(start: 2026-03-26T00:00:00Z)
-      |> filter(fn: (r) => r._measurement == "heart_rate" and r._field == "bpm")
+      |> filter(fn: (r) => r._measurement == "heart_rate_filtered" and r._field == "bpm")
       |> yield(name: "hr")
     '''
     rows = query_influx(q)
@@ -677,6 +678,108 @@ def analyze_temp():
             print(f"  {bucket_name:25s}: avg {c:5.1f}°C / {f:5.1f}°F  (n={len(bvals):,})")
 
 
+def analyze_otf_workouts():
+    """OTF workout HR analysis from chest strap data."""
+    print("\n" + "="*70)
+    print("OTF WORKOUT ANALYSIS (Chest Strap)")
+    print("="*70)
+
+    q = f'''
+    from(bucket: "{BUCKET}")
+      |> range(start: 0)
+      |> filter(fn: (r) => r._measurement == "otf_workout")
+      |> filter(fn: (r) => r._field == "avg_hr" or r._field == "max_hr" or r._field == "calories"
+                or r._field == "splat_points" or r._field == "avg_hr_pct" or r._field == "max_hr_pct"
+                or r._field == "zone_orange_min" or r._field == "zone_red_min"
+                or r._field == "zone_green_min" or r._field == "zone_blue_min" or r._field == "zone_gray_min")
+      |> yield(name: "otf")
+    '''
+    rows = query_influx(q)
+    if not rows:
+        print("No OTF workout data found.")
+        return
+
+    by_workout = defaultdict(dict)
+    for r in rows:
+        t = r["_time"]
+        by_workout[t][r.get("_field", "")] = float(r["_value"])
+
+    avg_hrs, max_hrs, splats, cals = [], [], [], []
+    # Track by year for trend analysis
+    by_year = defaultdict(lambda: {"avg_hr": [], "splats": [], "count": 0})
+
+    for t in sorted(by_workout.keys()):
+        w = by_workout[t]
+        avg = w.get("avg_hr", 0)
+        mx = w.get("max_hr", 0)
+        sp = w.get("splat_points", 0)
+        cal = w.get("calories", 0)
+        if avg > 50:  # skip malformed entries
+            avg_hrs.append(avg)
+            if mx > 0: max_hrs.append(mx)
+            splats.append(sp)
+            cals.append(cal)
+            year = t[:4]
+            by_year[year]["avg_hr"].append(avg)
+            by_year[year]["splats"].append(sp)
+            by_year[year]["count"] += 1
+
+    print(f"\n  Total OTF workouts: {len(avg_hrs)}")
+    if not avg_hrs:
+        return
+
+    print(f"\n--- Overall Workout Stats ---")
+    print(f"  Avg workout HR:     {sum(avg_hrs)/len(avg_hrs):.0f} bpm")
+    if max_hrs:
+        print(f"  Avg max HR:         {sum(max_hrs)/len(max_hrs):.0f} bpm (peak: {max(max_hrs):.0f})")
+    print(f"  Avg splat points:   {sum(splats)/len(splats):.0f}")
+    print(f"  Avg calories:       {sum(cals)/len(cals):.0f}")
+
+    # HR distribution across workouts
+    print(f"\n--- Workout Avg HR Distribution ---")
+    whr_buckets = [
+        ("< 110 (easy)", 0, 110),
+        ("110-119", 110, 120),
+        ("120-129", 120, 130),
+        ("130-139", 130, 140),
+        ("140+ (max effort)", 140, 200),
+    ]
+    for label, lo, hi in whr_buckets:
+        count = sum(1 for h in avg_hrs if lo <= h < hi)
+        pct = count / len(avg_hrs) * 100
+        bar = "█" * int(pct / 2)
+        print(f"  {label:25s}: {pct:5.1f}%  {bar}")
+
+    # Year-over-year trend
+    print(f"\n--- Year-over-Year Fitness Trend ---")
+    print(f"  {'Year':>6s} {'Workouts':>9s} {'Avg HR':>7s} {'Avg Splats':>11s}")
+    print(f"  {'-'*6} {'-'*9} {'-'*7} {'-'*11}")
+    for year in sorted(by_year.keys()):
+        y = by_year[year]
+        avg = sum(y["avg_hr"]) / len(y["avg_hr"])
+        sp = sum(y["splats"]) / len(y["splats"])
+        print(f"  {year:>6s} {y['count']:>9d} {avg:>7.0f} {sp:>11.0f}")
+
+    if len(by_year) >= 2:
+        years = sorted(by_year.keys())
+        first_avg = sum(by_year[years[0]]["avg_hr"]) / len(by_year[years[0]]["avg_hr"])
+        last_avg = sum(by_year[years[-1]]["avg_hr"]) / len(by_year[years[-1]]["avg_hr"])
+        delta = last_avg - first_avg
+        print(f"\n  Trend: {delta:+.0f} bpm avg HR from {years[0]} to {years[-1]}")
+        if delta < -5:
+            print(f"  → Lower HR at same effort = improved cardiovascular fitness")
+
+    # Complete HR profile
+    print(f"\n--- COMPLETE HR PROFILE ---")
+    print(f"  Deep sleep:        48-55 bpm   (ring, Kalman-filtered)")
+    print(f"  Light/REM sleep:   55-65 bpm   (ring, Kalman-filtered)")
+    print(f"  Daytime resting:   60-80 bpm   (ring, Kalman-filtered)")
+    print(f"  OTF workout avg:   {sum(avg_hrs)/len(avg_hrs):.0f} bpm      (chest strap, {len(avg_hrs)} sessions)")
+    if max_hrs:
+        print(f"  OTF workout peak:  {max(max_hrs):.0f} bpm      (chest strap)")
+    print(f"  Dynamic range:     ~{max(max_hrs) - 48:.0f} bpm   (sleep floor to workout peak)" if max_hrs else "")
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("PHYSIOLOGICAL DEEP DIVE — March 26 to Present")
@@ -690,6 +793,7 @@ if __name__ == "__main__":
     analyze_hrv()
     analyze_stress()
     analyze_temp()
+    analyze_otf_workouts()
 
     print("\n" + "=" * 70)
     print("END OF REPORT")

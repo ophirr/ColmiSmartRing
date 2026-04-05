@@ -67,9 +67,10 @@ struct SleepStageGraphView: View {
     }
 
     private func minuteToLabel(_ minuteFromStart: Int) -> String {
-        // Ring clock is UTC — convert to local time for display.
-        let utcOffsetMinutes = TimeZone.current.secondsFromGMT() / 60
-        let total = Int(day.sleepStart) + minuteFromStart + utcOffsetMinutes
+        // sleepStart is minutes-after-midnight on the ring's clock.
+        // The Colmi ring reports sleep times that should display directly
+        // without timezone conversion (matching QRing companion app behavior).
+        let total = Int(day.sleepStart) + minuteFromStart
         let m = ((total % (24 * 60)) + (24 * 60)) % (24 * 60)  // ensure positive
         let h = m / 60
         let min = m % 60

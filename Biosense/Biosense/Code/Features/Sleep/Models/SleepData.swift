@@ -67,9 +67,9 @@ struct SleepDay: Sendable {
     let periods: [SleepPeriod]
 
     /// Time in bed in minutes (sum of all period durations).
-    /// Note: sleepStart/sleepEnd are UTC clock times for display only — the period
+    /// Note: sleepStart/sleepEnd are local clock times for display only — the period
     /// sum is the authoritative duration since the start/end overnight arithmetic
-    /// breaks when both values fall on the same side of midnight in UTC.
+    /// can break when both values fall on the same side of midnight.
     var totalDurationMinutes: Int {
         periods.reduce(0) { $0 + Int($1.minutes) }
     }
