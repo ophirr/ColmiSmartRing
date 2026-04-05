@@ -278,7 +278,10 @@ struct ReadingsGraphsView: View {
 
                 let nightValid = nightSlots.filter { $0 > 0 }
                 let dayValid = daySlots.filter { $0 > 0 }
-                guard nightValid.count >= 3, dayValid.count >= 3 else { return nil }
+                // Require at least 30 night readings (~2.5h at 5-min intervals)
+                // and 30 day readings for a meaningful ratio. Sparse data produces
+                // unreliable ratios that create artificial oscillation patterns.
+                guard nightValid.count >= 30, dayValid.count >= 30 else { return nil }
 
                 let nightAvg = Double(nightValid.reduce(0, +)) / Double(nightValid.count)
                 let dayAvg = Double(dayValid.reduce(0, +)) / Double(dayValid.count)
