@@ -66,9 +66,13 @@ struct GymScreenView: View {
             }
             .onChange(of: gymManager.workoutState) { _, newState in
                 if newState == .finished {
-                    completedWorkout = gymManager.buildCompletedWorkout()
-                    if completedWorkout != nil {
-                        showingSaveConfirm = true
+                    // Workout was already saved on stop. Now save recovery data
+                    // (collected during the 180s post-workout period).
+                    let finalWorkout = gymManager.buildCompletedWorkout()
+                    if let recovery = finalWorkout?.toStoredHRRecovery() {
+                        modelContext.insert(recovery)
+                        try? modelContext.save()
+                        tLog("[Gym] Saved recovery data: \(recovery.samples.count) samples")
                     }
                 }
             }
