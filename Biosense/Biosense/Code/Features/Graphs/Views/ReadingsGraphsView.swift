@@ -248,14 +248,22 @@ struct ReadingsGraphsView: View {
         let localLog = log.toHeartRateLog()
         let rangeMin = max(localLog.range, 1)
         let slotsPerHour = 60 / rangeMin
+        let nightEnd = 6 * slotsPerHour
+
+        // First pass: collect valid night readings to compute adaptive threshold.
+        // Use 90th percentile as the cutoff — anything above is a motion artifact.
+        let nightValid = localLog.heartRates.prefix(nightEnd).filter { $0 > 0 }.sorted()
+        let nightCap: Int
+        if nightValid.count >= 10 {
+            nightCap = nightValid[Int(Double(nightValid.count) * 0.9)]
+        } else {
+            nightCap = 80  // fallback
+        }
+
         return localLog.heartRates.enumerated().map { idx, bpm in
             guard bpm > 0 else { return 0 }
-            let hour = idx / slotsPerHour
-            // Sleep hours (0-6): reject > 90 BPM as motion artifacts
-            if hour < 6 && bpm > 90 { return 0 }
-            // All hours: reject > 100 BPM. The 5-min HR log captures resting
-            // readings only (workouts use separate telemetry). Readings > 100
-            // in this log are motion artifacts, not real resting HR.
+            let isNight = idx < nightEnd
+            if isNight && bpm > nightCap { return 0 }
             if bpm > 100 { return 0 }
             return bpm
         }
