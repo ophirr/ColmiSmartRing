@@ -250,14 +250,18 @@ struct ReadingsGraphsView: View {
         let slotsPerHour = 60 / rangeMin
         let nightEnd = 6 * slotsPerHour
 
-        // First pass: collect valid night readings to compute adaptive threshold.
-        // Use 90th percentile as the cutoff — anything above is a motion artifact.
+        // IQR-based outlier rejection for sleep hours.
+        // Standard statistical method: upper fence = Q3 + 1.5 * IQR.
+        // This adapts to the actual distribution and rejects the artifact tail.
         let nightValid = localLog.heartRates.prefix(nightEnd).filter { $0 > 0 }.sorted()
         let nightCap: Int
         if nightValid.count >= 10 {
-            nightCap = nightValid[Int(Double(nightValid.count) * 0.9)]
+            let q1 = nightValid[nightValid.count / 4]
+            let q3 = nightValid[nightValid.count * 3 / 4]
+            let iqr = q3 - q1
+            nightCap = q3 + max(iqr * 3 / 2, 5)  // at least 5 bpm above Q3
         } else {
-            nightCap = 80  // fallback
+            nightCap = 75
         }
 
         return localLog.heartRates.enumerated().map { idx, bpm in
