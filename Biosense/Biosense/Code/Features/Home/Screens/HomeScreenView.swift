@@ -14,7 +14,10 @@ struct HomeScreenView: View {
     @Query(sort: \StoredCRFEstimate.date, order: .reverse) private var storedCRFEstimates: [StoredCRFEstimate]
 
     private var latestSleepDurationMinutes: Int? {
-        storedSleepDays.first.map { $0.toSleepDay().totalDurationMinutes }
+        // Skip naps — show the most recent overnight sleep
+        storedSleepDays
+            .first { !$0.toSleepDay().isNap }
+            .map { $0.toSleepDay().totalDurationMinutes }
     }
 
     private var todayHeartRateAverage: Int? {
@@ -100,7 +103,10 @@ struct HomeScreenView: View {
 
     private var todaySleepRecord: StoredSleepDay? {
         let today = Calendar.current.startOfDay(for: Date())
-        return storedSleepDays.first { Calendar.current.isDate($0.sleepDate, inSameDayAs: today) }
+        // Skip naps — find today's overnight sleep record
+        return storedSleepDays.first {
+            Calendar.current.isDate($0.sleepDate, inSameDayAs: today) && !$0.toSleepDay().isNap
+        }
     }
 
     private var todaySleepSamples: [SleepSample] {

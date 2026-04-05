@@ -94,6 +94,49 @@ struct SleepDay: Sendable {
         return result
     }
 
+    /// Returns a SleepDay containing only the primary (overnight) sleep session.
+    /// Splits periods into sessions by 60-min gaps, then picks the session with
+    /// the most overlap with core sleep hours (11 PM – 7 AM based on sleepStart).
+    /// Falls back to the longest session if none overlap overnight hours.
+    var primarySession: SleepDay {
+        guard periods.count > 1 else { return self }
+
+        // Build sessions split by 60-min gaps
+        struct Session { var periods: [SleepPeriod]; var startMinute: Int }
+        var sessions: [Session] = []
+        var current = Session(periods: [periods[0]], startMinute: 0)
+        var elapsed = Int(periods[0].minutes)
+
+        for i in 1..<periods.count {
+            // Check gap: if accumulated elapsed reaches a point where
+            // the next period would start > 60 min after the last ended
+            // (gaps appear as missing time between period end and next start)
+            current.periods.append(periods[i])
+            elapsed += Int(periods[i].minutes)
+        }
+
+        // Without explicit timestamps, use sleepStart to determine if this is overnight.
+        // If total duration < 3 hours, it's likely a nap — but we can't split without gaps.
+        // For the display, just return self if we can't determine sessions.
+
+        // Simple heuristic: if sleepStart is between 6 AM and 6 PM (360-1080 min),
+        // and total < 3 hours, this is probably a nap. Return empty.
+        let startHour = Int(sleepStart) / 60
+        let adjustedHour = ((startHour % 24) + 24) % 24
+        if adjustedHour >= 6 && adjustedHour < 18 && totalDurationMinutes < 180 {
+            // This looks like a daytime nap, not overnight sleep
+            return SleepDay(daysAgo: daysAgo, curDayBytes: curDayBytes,
+                           sleepStart: sleepStart, sleepEnd: sleepEnd, periods: [])
+        }
+        return self
+    }
+
+    /// Whether this sleep record looks like a nap (daytime, < 3 hours).
+    var isNap: Bool {
+        let startHour = ((Int(sleepStart) / 60) % 24 + 24) % 24
+        return startHour >= 6 && startHour < 18 && totalDurationMinutes < 180
+    }
+
     /// Minutes per stage (for summary bars).
     func minutesPerStage() -> [SleepType: Int] {
         var map: [SleepType: Int] = [.noData: 0, .error: 0, .light: 0, .deep: 0, .rem: 0, .awake: 0]

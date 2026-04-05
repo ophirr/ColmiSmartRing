@@ -34,7 +34,8 @@ struct SleepSectionView: View {
             .accessibilityLabel(L10n.A11y.sleepRequest)
             .accessibilityHint(Text(L10n.A11y.sleepRequestHint))
 
-            if let sleep = ringSessionManager.lastBigDataSleep, let firstDay = sleep.days.first {
+            if let sleep = ringSessionManager.lastBigDataSleep,
+               let firstDay = sleep.days.first(where: { !$0.isNap }) ?? sleep.days.first {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(L10n.Sleep.daysCount(sleep.days.count))
                         .font(.subheadline.weight(.medium))
