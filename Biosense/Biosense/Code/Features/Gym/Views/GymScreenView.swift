@@ -64,6 +64,14 @@ struct GymScreenView: View {
                     gymManager.resetToIdle()
                 }
             }
+            .onChange(of: gymManager.workoutState) { _, newState in
+                if newState == .finished {
+                    completedWorkout = gymManager.buildCompletedWorkout()
+                    if completedWorkout != nil {
+                        showingSaveConfirm = true
+                    }
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { showingHistory = true } label: {
@@ -352,14 +360,6 @@ struct GymScreenView: View {
                     .background(.ultraThinMaterial, in: Capsule())
             }
             .padding(.bottom, 40)
-        }
-        .onChange(of: gymManager.workoutState) { _, newState in
-            if newState == .finished {
-                completedWorkout = gymManager.buildCompletedWorkout()
-                if completedWorkout != nil {
-                    showingSaveConfirm = true
-                }
-            }
         }
     }
 

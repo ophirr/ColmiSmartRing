@@ -331,6 +331,11 @@ class GymSessionManager {
         recoveryElapsed = 0
         recoveryStartTime = Date()
 
+        // Send immediate keepalive so the PPG doesn't drop between sport-end and
+        // the first recovery tick (5s gap was causing the green LED to turn off).
+        ringManager?.sendRealtimeHRContinue()
+        lastContinueKeepAliveTime = Date()
+
         // Recovery tick: sample HR at 1 Hz, send keepalives, auto-finish at 180s
         recoveryTask = Task { [weak self] in
             while !Task.isCancelled {
