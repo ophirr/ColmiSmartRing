@@ -1032,6 +1032,18 @@ struct ReadingsGraphsView: View {
         }
     }
 
+    /// Trend indicator: compares latest value to previous. Returns (icon, color, delta).
+    private func trend(data: [TimeSeriesPoint]) -> (icon: String, color: Color, delta: Double)? {
+        guard data.count >= 2 else { return nil }
+        let latest = data[data.count - 1].value
+        let previous = data[data.count - 2].value
+        let delta = latest - previous
+        if abs(delta) < 0.001 { return ("minus", .gray, 0) }
+        return delta > 0
+            ? ("arrow.up.right", .green, delta)
+            : ("arrow.down.right", .orange, delta)
+    }
+
     private var nightDipRatioView: some View {
         let data = nightDipRatioDaily
         let latest = data.last?.value ?? 0
@@ -1042,12 +1054,24 @@ struct ReadingsGraphsView: View {
         else if avg < 0.90 { assessment = "Normal dipper"; color = .green }
         else if avg < 1.00 { assessment = "Non-dipper"; color = .orange }
         else { assessment = "Reverse dipper"; color = .red }
+        // For night dip, lower is better (stronger dip), so invert arrow meaning
+        let dipTrend = trend(data: data)
+        let trendIcon = dipTrend.map { $0.delta < 0 ? "arrow.down.right" : "arrow.up.right" }
+        let trendColor: Color? = dipTrend.map { $0.delta < 0 ? .green : .orange }
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("Night Dip Ratio")
                     .font(.subheadline.weight(.medium))
                 Spacer()
+                if let icon = trendIcon, let tc = trendColor, let t = dipTrend {
+                    Image(systemName: icon)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(tc)
+                    Text(String(format: "%+.3f", t.delta))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(tc)
+                }
                 Text(String(format: "%.3f", latest))
                     .font(.title2.weight(.bold).monospacedDigit())
             }
@@ -1093,12 +1117,22 @@ struct ReadingsGraphsView: View {
         let data = sdhrDaily
         let latest = data.last?.value ?? 0
         let avg = data.isEmpty ? 0 : data.map(\.value).reduce(0, +) / Double(data.count)
+        // Higher SDHR = better autonomic flexibility
+        let sdhrTrend = trend(data: data)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("HR Variability (SDHR)")
                     .font(.subheadline.weight(.medium))
                 Spacer()
+                if let t = sdhrTrend {
+                    Image(systemName: t.icon)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(t.color)
+                    Text(String(format: "%+.1f", t.delta))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(t.color)
+                }
                 Text(String(format: "%.1f", latest))
                     .font(.title2.weight(.bold).monospacedDigit())
                 Text("bpm")
