@@ -239,35 +239,26 @@ struct ReadingsGraphsView: View {
 
     // MARK: - Derived autonomic metrics
 
-    /// Get locally-rotated HR log with basic artifact rejection.
-    /// Removes obvious motion artifacts (> 90 BPM during sleep hours 0-6,
-    /// > 130 BPM during daytime) while preserving real physiological variation.
-    /// The Kalman filter is too aggressive here — it flattens the night/day
-    /// difference that these metrics need to measure.
+    /// Get locally-rotated HR log with artifact rejection.
+    /// Sleep HR is bimodal: real readings at 50-60 + motion artifact tail at 80-170.
+    /// Median is robust to outliers, so cap at median + 10 bpm.
     private func cleanedHR(from log: StoredHeartRateLog) -> [Int] {
         let localLog = log.toHeartRateLog()
         let rangeMin = max(localLog.range, 1)
         let slotsPerHour = 60 / rangeMin
         let nightEnd = 6 * slotsPerHour
 
-        // IQR-based outlier rejection for sleep hours.
-        // Standard statistical method: upper fence = Q3 + 1.5 * IQR.
-        // This adapts to the actual distribution and rejects the artifact tail.
         let nightValid = localLog.heartRates.prefix(nightEnd).filter { $0 > 0 }.sorted()
         let nightCap: Int
-        if nightValid.count >= 10 {
-            let q1 = nightValid[nightValid.count / 4]
-            let q3 = nightValid[nightValid.count * 3 / 4]
-            let iqr = q3 - q1
-            nightCap = q3 + max(iqr * 3 / 2, 5)  // at least 5 bpm above Q3
+        if nightValid.count >= 5 {
+            nightCap = nightValid[nightValid.count / 2] + 10
         } else {
-            nightCap = 75
+            nightCap = 70
         }
 
         return localLog.heartRates.enumerated().map { idx, bpm in
             guard bpm > 0 else { return 0 }
-            let isNight = idx < nightEnd
-            if isNight && bpm > nightCap { return 0 }
+            if idx < nightEnd && bpm > nightCap { return 0 }
             if bpm > 100 { return 0 }
             return bpm
         }
