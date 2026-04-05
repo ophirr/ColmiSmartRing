@@ -295,10 +295,13 @@ struct GymScreenView: View {
                 }
 
                 Button {
-                    // Enters recovery mode (180s HR recording), not immediate finish
+                    // Save workout immediately, then enter recovery mode
                     finishedZoneTimeSeconds = gymManager.zoneTimeSeconds
                     finishedDurationSeconds = gymManager.elapsedSeconds
-                    gymManager.stopWorkout()
+                    completedWorkout = gymManager.stopWorkout()
+                    if completedWorkout != nil {
+                        saveWorkout()
+                    }
                 } label: {
                     ControlCircle(icon: "stop.fill", color: .red)
                 }

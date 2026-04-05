@@ -2041,6 +2041,13 @@ extension RingSessionManager {
     /// Send a command-30 "continue" keepalive to tell the ring to keep
     /// the PPG sensor running.  The Colmi protocol docs say the request
     /// type field is "only set to 3 in app".
+    /// Restart the real-time HR stream (green LED). Used after sendPhoneSport(.end)
+    /// which kills the active PPG. A continue keepalive alone doesn't reactivate it.
+    func restartRealtimeHR() {
+        sendRealTimeStart(type: .realtimeHeartRate)
+        tLog("[RT-HR] Restarted real-time HR stream for recovery")
+    }
+
     func sendRealtimeHRContinue() {
         guard peripheralConnected, characteristicsDiscovered else { return }
         do {
