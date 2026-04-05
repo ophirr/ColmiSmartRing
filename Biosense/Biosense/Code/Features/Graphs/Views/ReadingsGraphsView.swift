@@ -240,12 +240,15 @@ struct ReadingsGraphsView: View {
     // MARK: - Derived autonomic metrics
 
     /// Apply the resting HR Kalman filter to a stored HR log's readings.
+    /// Uses toHeartRateLog() to rotate slots from UTC to local time first
+    /// (slot 0 = UTC midnight, rotation aligns with local midnight).
     /// Removes motion artifacts (spikes to 100-170 BPM) before computing metrics.
     private func filteredHR(from log: StoredHeartRateLog) -> [Int] {
+        let localLog = log.toHeartRateLog()
         let filter = RestingHRFilter()
-        let rangeMin = max(log.range, 1)
-        let start = log.dayStart
-        return log.heartRates.enumerated().map { idx, bpm in
+        let rangeMin = max(localLog.range, 1)
+        let start = Calendar.current.startOfDay(for: log.dayStart)
+        return localLog.heartRates.enumerated().map { idx, bpm in
             guard bpm > 0 else { return 0 }
             let time = start.addingTimeInterval(TimeInterval(idx * rangeMin * 60))
             return filter.process(rawBPM: bpm, time: time).bpm
