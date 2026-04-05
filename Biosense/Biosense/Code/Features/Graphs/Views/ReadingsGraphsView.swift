@@ -1060,6 +1060,7 @@ struct ReadingsGraphsView: View {
                         .symbolSize(20)
                 }
                 .chartYScale(domain: 0.7...1.1)
+                .padding(.top, 4)
                 .chartYAxis {
                     AxisMarks(values: [0.8, 0.9, 1.0]) { value in
                         AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4, 4]))
