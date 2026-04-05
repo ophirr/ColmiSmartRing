@@ -278,10 +278,11 @@ struct ReadingsGraphsView: View {
 
                 let nightValid = nightSlots.filter { $0 > 0 }
                 let dayValid = daySlots.filter { $0 > 0 }
-                // Require at least 30 night readings (~2.5h at 5-min intervals)
-                // and 30 day readings for a meaningful ratio. Sparse data produces
-                // unreliable ratios that create artificial oscillation patterns.
-                guard nightValid.count >= 30, dayValid.count >= 30 else { return nil }
+                // Require at least 5 night and 5 day readings. The ring's internal
+                // HR log records every 5-30 min — even 6-10 readings across a sleep
+                // period are representative. These are averaged values, not noisy
+                // real-time samples.
+                guard nightValid.count >= 5, dayValid.count >= 5 else { return nil }
 
                 let nightAvg = Double(nightValid.reduce(0, +)) / Double(nightValid.count)
                 let dayAvg = Double(dayValid.reduce(0, +)) / Double(dayValid.count)
