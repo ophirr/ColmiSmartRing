@@ -1010,8 +1010,9 @@ struct ReadingsGraphsView: View {
     private var autonomicSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 12) {
-                // Night Dip Ratio
-                if !nightDipRatioDaily.isEmpty {
+                // Night Dip Ratio — fall back to most recent available if today
+                // doesn't have enough data yet (e.g., early morning before daytime HR).
+                if !nightDipRatioDaily.isEmpty || !nightDipRatioAll.isEmpty {
                     nightDipRatioView
                 } else {
                     Text("Sync HR data to see autonomic metrics.")
@@ -1019,8 +1020,8 @@ struct ReadingsGraphsView: View {
                         .foregroundStyle(.tertiary)
                 }
 
-                // SDHR
-                if !sdhrDaily.isEmpty {
+                // SDHR — same fallback logic
+                if !sdhrDaily.isEmpty || !sdhrAll.isEmpty {
                     Divider()
                     sdhrView
                 }
@@ -1071,7 +1072,7 @@ struct ReadingsGraphsView: View {
     }
 
     private var nightDipRatioView: some View {
-        let data = nightDipRatioDaily
+        let data = nightDipRatioDaily.isEmpty ? nightDipRatioAll : nightDipRatioDaily
         let latest = data.last?.value ?? 0
         let avg = data.isEmpty ? 0 : data.map(\.value).reduce(0, +) / Double(data.count)
         let assessment: String
@@ -1140,7 +1141,7 @@ struct ReadingsGraphsView: View {
     }
 
     private var sdhrView: some View {
-        let data = sdhrDaily
+        let data = sdhrDaily.isEmpty ? sdhrAll : sdhrDaily
         let latest = data.last?.value ?? 0
         let avg = data.isEmpty ? 0 : data.map(\.value).reduce(0, +) / Double(data.count)
         // Higher SDHR = better autonomic flexibility
