@@ -239,13 +239,26 @@ struct ReadingsGraphsView: View {
 
     // MARK: - Derived autonomic metrics
 
+    /// Apply the resting HR Kalman filter to a stored HR log's readings.
+    /// Removes motion artifacts (spikes to 100-170 BPM) before computing metrics.
+    private func filteredHR(from log: StoredHeartRateLog) -> [Int] {
+        let filter = RestingHRFilter()
+        let rangeMin = max(log.range, 1)
+        let start = log.dayStart
+        return log.heartRates.enumerated().map { idx, bpm in
+            guard bpm > 0 else { return 0 }
+            let time = start.addingTimeInterval(TimeInterval(idx * rangeMin * 60))
+            return filter.process(rawBPM: bpm, time: time).bpm
+        }
+    }
+
     /// Night dip ratio per day: avg sleep HR (12a-6a) / avg daytime HR (9a-5p).
-    /// Computed from stored HR logs (5-min slots). Normal: 0.80-0.90.
+    /// Computed from Kalman-filtered HR logs. Normal: 0.80-0.90.
     private var nightDipRatioDaily: [TimeSeriesPoint] {
         storedHeartRateLogs
             .filter { $0.dayStart >= selectedRangeStart && $0.dayStart < selectedRangeEnd }
             .compactMap { log -> TimeSeriesPoint? in
-                let hrs = log.heartRates
+                let hrs = filteredHR(from: log)
                 let range = max(log.range, 1)
                 let slotsPerHour = 60 / range
                 // Night: slots covering 0:00-6:00 local
@@ -267,13 +280,13 @@ struct ReadingsGraphsView: View {
             .sorted { $0.time < $1.time }
     }
 
-    /// SDHR per day: standard deviation of all non-zero HR readings in the log.
+    /// SDHR per day: standard deviation of Kalman-filtered HR readings.
     /// Proxy for HRV — higher = more autonomic flexibility.
     private var sdhrDaily: [TimeSeriesPoint] {
         storedHeartRateLogs
             .filter { $0.dayStart >= selectedRangeStart && $0.dayStart < selectedRangeEnd }
             .compactMap { log -> TimeSeriesPoint? in
-                let valid = log.heartRates.filter { $0 > 0 }.map(Double.init)
+                let valid = filteredHR(from: log).filter { $0 > 0 }.map(Double.init)
                 guard valid.count >= 5 else { return nil }
                 let mean = valid.reduce(0, +) / Double(valid.count)
                 let variance = valid.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(valid.count)
