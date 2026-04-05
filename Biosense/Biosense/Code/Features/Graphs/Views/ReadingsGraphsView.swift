@@ -1125,7 +1125,7 @@ struct ReadingsGraphsView: View {
                 .chartYScale(domain: max(0.6, (data.map(\.value).min() ?? 0.7) - 0.05)...max(1.1, (data.map(\.value).max() ?? 1.0) + 0.05))
                 .padding(.top, 4)
                 .chartYAxis {
-                    AxisMarks(values: [0.8, 0.9, 1.0]) { value in
+                    AxisMarks(values: .stride(by: 0.1)) { value in
                         AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4, 4]))
                         AxisValueLabel {
                             if let v = value.as(Double.self) {
