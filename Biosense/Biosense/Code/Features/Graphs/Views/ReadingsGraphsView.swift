@@ -36,11 +36,22 @@ struct ReadingsGraphsView: View {
     }
 
     private var selectedSleepDays: [StoredSleepDay] {
-        sortedSleepDays.filter { mondayCalendar.isDate($0.sleepDate, inSameDayAs: selectedDayStart) }
+        // Overnight sleep starting the previous evening has nightDate = yesterday.
+        // Include both today and yesterday so "April 6" shows the April 5→6 night.
+        let calendar = mondayCalendar
+        let lastNight = calendar.date(byAdding: .day, value: -1, to: selectedDayStart) ?? selectedDayStart
+        return sortedSleepDays.filter {
+            calendar.isDate($0.sleepDate, inSameDayAs: selectedDayStart) ||
+            calendar.isDate($0.sleepDate, inSameDayAs: lastNight)
+        }
     }
 
     private var selectedSleepDay: StoredSleepDay? {
-        selectedSleepDays.first
+        // Prefer the longest non-nap record (the real overnight sleep)
+        selectedSleepDays
+            .filter { !$0.toSleepDay().isNap }
+            .max { $0.toSleepDay().totalDurationMinutes < $1.toSleepDay().totalDurationMinutes }
+            ?? selectedSleepDays.first
     }
 
     private var mondayCalendar: Calendar {

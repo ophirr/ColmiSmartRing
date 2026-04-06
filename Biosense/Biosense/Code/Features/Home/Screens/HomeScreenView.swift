@@ -102,11 +102,10 @@ struct HomeScreenView: View {
     }
 
     private var todaySleepRecord: StoredSleepDay? {
-        let today = Calendar.current.startOfDay(for: Date())
-        // Skip naps — find today's overnight sleep record
-        return storedSleepDays.first {
-            Calendar.current.isDate($0.sleepDate, inSameDayAs: today) && !$0.toSleepDay().isNap
-        }
+        // Show last night's sleep — the most recent overnight (non-nap) record.
+        // nightDate is the evening sleep started, typically yesterday relative to
+        // when the user opens the app in the morning. Match the summary card logic.
+        storedSleepDays.first { !$0.toSleepDay().isNap }
     }
 
     private var todaySleepSamples: [SleepSample] {
