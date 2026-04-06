@@ -118,8 +118,13 @@ final class KalmanHRFilter {
     private var previousCadenceSPM: Int = 0
     private var cadenceTransitionTicksRemaining: Int = 0
     private var cadenceTransitionDirection: Int = 0  // +1 = walk→run, -1 = run→walk
+    private var recoverySkepticismRemaining: Int = 0
     private static let cadenceTransitionThreshold: Int = 40
     private static let cadenceTransitionDuration: Int = 5
+    private static let walkToRunRampTicks: Int = 20
+    private static let recoverySkepticismDuration: Int = 60
+    private static let warmupTicks: Int = 120
+    private static let maxPhysiologicalCadence: Int = 200
 
     // Statistics
     private(set) var totalReadings: Int = 0
@@ -136,7 +141,14 @@ final class KalmanHRFilter {
 
         // --- Initialization ---
         if !initialized && rawBPM > 0 {
-            x = [Double(rawBPM), 0.0]
+            var initHR = Double(rawBPM)
+            // If first reading matches 2× walking cadence, it's likely a harmonic
+            // artifact. Clamp to a conservative warmup prior so the filter doesn't
+            // anchor on a biased value (e.g., 112 BPM when true HR is ~87).
+            if cadenceSPM >= 40 && cadenceSPM < 100 && abs(rawBPM - cadenceSPM * 2) < 15 {
+                initHR = min(initHR, 100.0)
+            }
+            x = [initHR, 0.0]
             P = [100.0, 0.0, 0.0, 10.0]
             initialized = true
             previousTime = timestamp
@@ -173,7 +185,7 @@ final class KalmanHRFilter {
             let innovation = Double(rawBPM) - x[0]
             let K = update(measurement: Double(rawBPM), R: R)
 
-            constrainState()
+            constrainState(dt: dt)
 
             let wasCorrected = R > Self.baseNoiseVariance * 3.0
             if wasCorrected {
@@ -203,7 +215,7 @@ final class KalmanHRFilter {
             )
         } else {
             // No measurement — coast on prediction only
-            constrainState()
+            constrainState(dt: dt)
 
             let pUncertainty = sqrt(P[0])
             let confidence = max(0.1, 1.0 - pUncertainty / 30.0)
@@ -240,6 +252,8 @@ final class KalmanHRFilter {
         previousCadenceSPM = 0
         cadenceTransitionTicksRemaining = 0
         cadenceTransitionDirection = 0
+        recoverySkepticismRemaining = 0
+        previousHR = 0.0
         totalReadings = 0
         correctedReadings = 0
         highNoiseReadings = 0
@@ -327,6 +341,13 @@ final class KalmanHRFilter {
                                           source: HRSource, packetAge: TimeInterval) -> Double {
         var R = Self.baseNoiseVariance
 
+        // P3: Warmup skepticism — PPG overreads during first ~2 min due to
+        // vasoconstriction and sensor settling. Inflate R to reduce confidence.
+        if totalReadings < Self.warmupTicks {
+            let warmupFraction = 1.0 - Double(totalReadings) / Double(Self.warmupTicks)
+            R *= (1.0 + 3.0 * warmupFraction)
+        }
+
         // Phase 1 (P-R1): Cadence-proportional base noise scaling.
         // During running (SPM > 100), the ring's PPG systematically overreads
         // by 20-30 BPM due to motion artifact. With K even at 0.15, consecutive
@@ -338,11 +359,36 @@ final class KalmanHRFilter {
         // With P ≈ 10, K ≈ 10/(10+263) = 0.04. Filter trusts prediction 96%.
         if cadenceSPM > 100 {
             let cadenceFactor = Double(cadenceSPM - 100) / 10.0
-            let cadenceNoiseMultiplier = 1.0 + 20.0 * cadenceFactor * cadenceFactor
+
+            // P1: Ramp cadence_intensity during walk→run transition.
+            // Start at 25% penalty, scale to 100% over walkToRunRampTicks
+            // so the filter can track legitimately rising HR at push onset.
+            var rampScale = 1.0
+            if cadenceTransitionTicksRemaining > 0 && cadenceTransitionDirection > 0 {
+                let elapsed = Self.walkToRunRampTicks - cadenceTransitionTicksRemaining
+                rampScale = 0.25 + 0.75 * min(1.0, Double(elapsed) / Double(Self.walkToRunRampTicks))
+            }
+
+            let cadenceNoiseMultiplier = 1.0 + rampScale * 20.0 * cadenceFactor * cadenceFactor
             R *= cadenceNoiseMultiplier
         }
 
-        // 1. Cadence proximity penalty (sigmoid, not binary)
+        // 1a. Walking cadence 2× harmonic penalty.
+        // During walking (40-99 SPM), the ring PPG often locks to 2× stride
+        // frequency (e.g., 57 SPM → 114 BPM). This is the dominant warmup
+        // error source. Strong multiplicative penalty because the reading is
+        // systematically biased, not just noisy.
+        if cadenceSPM >= 40 && cadenceSPM < 100 {
+            let doubleHarmonic = cadenceSPM * 2
+            let distance = abs(rawBPM - doubleHarmonic)
+            if distance < Self.cadenceProximityThreshold {
+                let exponent = (Double(distance) - Self.cadenceProximitySigmoidMid) * 0.5
+                let sigmoid = 1.0 / (1.0 + exp(exponent))
+                R *= (1.0 + 30.0 * sigmoid)
+            }
+        }
+
+        // 1b. Running cadence proximity penalty (sigmoid, not binary)
         if cadenceSPM >= Self.minCadenceForAdjustment {
             let proximity = cadenceHarmonicDistance(bpm: rawBPM, cadenceSPM: cadenceSPM)
             if proximity < Self.cadenceProximityThreshold {
@@ -376,6 +422,13 @@ final class KalmanHRFilter {
             }
         }
 
+        // P2: Recovery skepticism — PPG overreads during first ~60s after
+        // run→walk transition due to peripheral blood pooling.
+        if recoverySkepticismRemaining > 0 {
+            let decayFraction = Double(recoverySkepticismRemaining) / Double(Self.recoverySkepticismDuration)
+            R *= (1.0 + 3.0 * decayFraction)
+        }
+
         return R
     }
 
@@ -396,10 +449,21 @@ final class KalmanHRFilter {
         // can track the HR change instead of holding the old value.
         let cadenceDelta = cadenceSPM - previousCadenceSPM
         if abs(cadenceDelta) >= Self.cadenceTransitionThreshold {
-            cadenceTransitionTicksRemaining = Self.cadenceTransitionDuration
-            cadenceTransitionDirection = cadenceDelta > 0 ? 1 : -1
+            if cadenceDelta > 0 {
+                // Walk → run: longer ramp for cadence_intensity (P1)
+                cadenceTransitionTicksRemaining = Self.walkToRunRampTicks
+                cadenceTransitionDirection = 1
+            } else {
+                // Run → walk: trigger recovery skepticism (P2)
+                cadenceTransitionTicksRemaining = Self.cadenceTransitionDuration
+                cadenceTransitionDirection = -1
+                recoverySkepticismRemaining = Self.recoverySkepticismDuration
+            }
         } else if cadenceTransitionTicksRemaining > 0 {
             cadenceTransitionTicksRemaining -= 1
+        }
+        if recoverySkepticismRemaining > 0 {
+            recoverySkepticismRemaining -= 1
         }
         previousCadenceSPM = cadenceSPM
 
@@ -424,6 +488,11 @@ final class KalmanHRFilter {
     // MARK: - Source Transition Smoothing
 
     /// Temporarily inflate noise when the HR source changes to prevent step discontinuities.
+    ///
+    /// During high-intensity exercise (HR > 130), source transitions should
+    /// *increase* distrust of the new source — if the prediction says 160 and
+    /// the new source says 85, the prediction is far more likely correct.
+    /// At low intensity the original smoothing behavior is fine.
     private func sourceTransitionPenalty(currentSource: HRSource) -> Double {
         if let last = lastSource, last != currentSource {
             sourceTransitionTicks = Self.transitionSmoothingTicks
@@ -433,14 +502,41 @@ final class KalmanHRFilter {
         lastSource = currentSource
 
         if sourceTransitionTicks > 0 {
-            return 1.0 + 4.0 * Double(sourceTransitionTicks) / Double(Self.transitionSmoothingTicks)
+            let basePenalty = 1.0 + 4.0 * Double(sourceTransitionTicks) / Double(Self.transitionSmoothingTicks)
+            // At high HR, amplify distrust of new source readings.
+            // At HR 160, multiplier is 1+4*(30/20)=7, so total penalty ≈ 5*7=35.
+            // This keeps K tiny and the filter holds its prediction.
+            if x[0] > 130 {
+                let intensityBoost = 1.0 + 4.0 * ((x[0] - 130.0) / 20.0)
+                return basePenalty * intensityBoost
+            }
+            return basePenalty
         }
         return 1.0
     }
 
     // MARK: - Physiological Constraints
 
-    private func constrainState() {
+    /// Hard rate-of-change ceiling on HR state.
+    /// The Kalman update can produce arbitrarily large HR jumps when the gain
+    /// opens up (e.g., source transitions).  A 160→83 BPM drop in 1 second is
+    /// physiologically impossible during exercise.  This clamp is applied
+    /// *after* update() so it acts as a hard floor/ceiling regardless of the
+    /// probabilistic blending.
+    private var previousHR: Double = 0.0
+
+    private func constrainState(dt: Double = 1.0) {
+        // Rate-of-change clamp on HR
+        if previousHR > 0 {
+            let maxRise = Self.maxRiseRate * dt   // e.g. 4.0 BPM/sec
+            let maxFall = Self.maxFallRate * dt   // e.g. 6.0 BPM/sec
+            let upper = previousHR + maxRise
+            let lower = previousHR - maxFall
+            x[0] = max(lower, min(upper, x[0]))
+        }
+        previousHR = x[0]
+
+        // Absolute bounds
         x[0] = max(Self.minHR, min(Self.maxHR, x[0]))
         x[1] = max(-Self.maxFallRate, min(Self.maxRiseRate, x[1]))
     }
@@ -469,7 +565,18 @@ final class KalmanHRFilter {
             if penalty > maxPenalty { maxPenalty = penalty; dominant = "cadence_intensity" }
         }
 
-        // Cadence proximity
+        // Walking cadence 2× harmonic
+        if cadenceSPM >= 40 && cadenceSPM < 100 {
+            let distance = abs(rawBPM - cadenceSPM * 2)
+            if distance < Self.cadenceProximityThreshold {
+                let exponent = (Double(distance) - Self.cadenceProximitySigmoidMid) * 0.5
+                let sigmoid = 1.0 / (1.0 + exp(exponent))
+                let penalty = 30.0 * sigmoid
+                if penalty > maxPenalty { maxPenalty = penalty; dominant = "walking_harmonic" }
+            }
+        }
+
+        // Running cadence proximity
         if cadenceSPM >= Self.minCadenceForAdjustment {
             let proximity = cadenceHarmonicDistance(bpm: rawBPM, cadenceSPM: cadenceSPM)
             if proximity < Self.cadenceProximityThreshold {
@@ -520,7 +627,11 @@ final class KalmanHRFilter {
         guard deltaSteps >= 0 else { return heldCadence(at: timestamp) }
         if deltaSteps == 0 { return heldCadence(at: timestamp) }
 
-        let instantSPM = Int(Double(deltaSteps) / dt * 60.0)
+        var instantSPM = Int(Double(deltaSteps) / dt * 60.0)
+        // P0: Cap at physiological maximum; halve if above (doubling artifact)
+        if instantSPM > Self.maxPhysiologicalCadence {
+            instantSPM /= 2
+        }
         recentCadenceSamples.append(instantSPM)
         if recentCadenceSamples.count > Self.cadenceSmoothingWindow {
             recentCadenceSamples.removeFirst()
