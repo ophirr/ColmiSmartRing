@@ -1085,7 +1085,11 @@ struct ReadingsGraphsView: View {
     private var nightDipRatioView: some View {
         let data = nightDipRatioDaily.isEmpty ? nightDipRatioAll : nightDipRatioDaily
         let latest = data.last?.value ?? 0
-        let avg = data.isEmpty ? 0 : data.map(\.value).reduce(0, +) / Double(data.count)
+        // For week/month with limited data, use all-history average for context
+        let useAllAvg = !selectedTimeRange.isSubDay && nightDipRatioAll.count > data.count
+        let avgSource = useAllAvg ? nightDipRatioAll : data
+        let avg = avgSource.isEmpty ? 0 : avgSource.map(\.value).reduce(0, +) / Double(avgSource.count)
+        let nightsCount = data.count
         let assessment: String
         let color: Color
         if avg < 0.80 { assessment = "Extreme dipper"; color = .blue }
@@ -1101,6 +1105,11 @@ struct ReadingsGraphsView: View {
             HStack {
                 Text("Night Dip Ratio")
                     .font(.subheadline.weight(.medium))
+                if !selectedTimeRange.isSubDay {
+                    Text("\(nightsCount) \(nightsCount == 1 ? "night" : "nights")")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
                 Spacer()
                 if let icon = trendIcon, let tc = trendColor, let t = dipTrend {
                     Image(systemName: icon)
@@ -1117,7 +1126,7 @@ struct ReadingsGraphsView: View {
                 Text(assessment)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(color)
-                Text("Avg: \(String(format: "%.3f", avg))")
+                Text("\(useAllAvg ? "All avg" : "Avg"): \(String(format: "%.3f", avg))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("Sleep HR ÷ Day HR")
@@ -1154,7 +1163,10 @@ struct ReadingsGraphsView: View {
     private var sdhrView: some View {
         let data = sdhrDaily.isEmpty ? sdhrAll : sdhrDaily
         let latest = data.last?.value ?? 0
-        let avg = data.isEmpty ? 0 : data.map(\.value).reduce(0, +) / Double(data.count)
+        // For week/month with limited data, use all-history average for context
+        let useAllAvg = !selectedTimeRange.isSubDay && sdhrAll.count > data.count
+        let avgSource = useAllAvg ? sdhrAll : data
+        let avg = avgSource.isEmpty ? 0 : avgSource.map(\.value).reduce(0, +) / Double(avgSource.count)
         // Higher SDHR = better autonomic flexibility
         let sdhrTrend = trend(data: data, allData: sdhrAll)
 
@@ -1178,7 +1190,7 @@ struct ReadingsGraphsView: View {
                     .foregroundStyle(.secondary)
             }
             HStack(spacing: 12) {
-                Text("Avg: \(String(format: "%.1f", avg)) bpm")
+                Text("\(useAllAvg ? "All avg" : "Avg"): \(String(format: "%.1f", avg)) bpm")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("Sleep HR variability")
